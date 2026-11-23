@@ -1,6 +1,31 @@
-# doko
+<p align="center">
+  <img src="assets/doko.svg" width="128" height="128" alt="doko logo: a woven bamboo basket carried by one strap">
+</p>
 
-A Rails/Loco-style framework for Cloudflare Workers in Rust, built on [`worker`](https://crates.io/crates/worker) + axum. See [PLAN.md](PLAN.md) for the roadmap.
+<h1 align="center">doko</h1>
+
+<p align="center"><b>Put everything in the basket. Carry it with one strap.</b><br>
+A batteries-included Rust framework for Cloudflare Workers.</p>
+
+---
+
+A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
+
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs and cron all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+
+**What's in the basket**
+
+| | |
+|---|---|
+| [Routing and handlers](#handlers) | axum routers, a `Ctx` extractor, JSON errors, request logs |
+| [Config and environments](#config-and-environments) | typed config merged per env, vars and secrets |
+| [Storage](#storage-kv-r2-d1) | typed KV, R2 and D1 bindings, plus D1 migrations |
+| [Cache](#cache) | response caching with stale-while-revalidate and global tag purges |
+| [Jobs and cron](#background-jobs-and-cron-tasks) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
+| [Generators](#generators) | `doko new`, `generate controller \| job \| migration` |
+| [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
+
+doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Quick start
 
