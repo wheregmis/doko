@@ -1,10 +1,11 @@
 mod bindings;
 mod controllers;
+mod jobs;
+mod tasks;
 
 use doko::{
-    Ctx, Hooks, Result,
+    Ctx, Hooks, Jobs, Result, Tasks,
     axum::{Json, Router, routing::get},
-    worker::{ScheduledEvent, console_log},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,8 +26,12 @@ impl Hooks for App {
             .merge(controllers::routes())
     }
 
-    async fn on_scheduled(_ctx: Ctx, event: ScheduledEvent) {
-        console_log!("cron fired: {}", event.cron());
+    fn jobs() -> Jobs {
+        Jobs::new().add::<jobs::CountWords>()
+    }
+
+    fn tasks() -> Tasks {
+        Tasks::new().add("prune", tasks::prune)
     }
 }
 

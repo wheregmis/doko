@@ -74,6 +74,12 @@ No ORM in v1: D1 is SQLite, so serde row mapping plus raw SQL covers most needs.
 - Retries and dead-letter queue settings in `doko.toml`.
 - Cron tasks declared in `doko.toml`, mapped to named handlers.
 
+**Status (Phase 4 done):**
+- Jobs use a `Job` trait with a `NAME` constant instead of a `#[doko::job]` proc macro, so there's still no proc-macro crate.
+- `on_scheduled` is replaced by named `Tasks`, with schedules set in doko.toml's `[tasks]` per env.
+- A queue is always both produced and consumed by this worker.
+- Messages in a batch run one at a time.
+
 ### Phase 5: developer experience
 - `doko new <app>` templates; `generate job|migration|controller`.
 - Integration tests through `wrangler dev` / Miniflare, with a `doko::test` helper that starts a local worker and an HTTP client.

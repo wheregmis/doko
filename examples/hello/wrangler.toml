@@ -15,6 +15,9 @@ DOKO_ENV = "dev"
 [vars.DOKO_CONFIG]
 greeting = "hello from doko"
 
+[vars.DOKO_TASKS]
+prune = "*/30 * * * *"
+
 [[kv_namespaces]]
 binding = "CACHE"
 
@@ -26,11 +29,27 @@ bucket_name = "doko-hello-files"
 binding = "DB"
 database_name = "doko-hello"
 
+[[queues.producers]]
+binding = "JOBS"
+queue = "doko-hello-jobs"
+
+[[queues.consumers]]
+queue = "doko-hello-jobs"
+max_batch_timeout = 1
+max_retries = 2
+dead_letter_queue = "doko-hello-jobs-dlq"
+
+[env.prod.triggers]
+crons = ["0 3 * * *"]
+
 [env.prod.vars]
 DOKO_ENV = "prod"
 
 [env.prod.vars.DOKO_CONFIG]
 greeting = "hello from doko (prod)"
+
+[env.prod.vars.DOKO_TASKS]
+prune = "0 3 * * *"
 
 [[env.prod.kv_namespaces]]
 binding = "CACHE"
@@ -42,3 +61,13 @@ bucket_name = "doko-hello-files"
 [[env.prod.d1_databases]]
 binding = "DB"
 database_name = "doko-hello"
+
+[[env.prod.queues.producers]]
+binding = "JOBS"
+queue = "doko-hello-jobs"
+
+[[env.prod.queues.consumers]]
+queue = "doko-hello-jobs"
+max_batch_timeout = 1
+max_retries = 2
+dead_letter_queue = "doko-hello-jobs-dlq"

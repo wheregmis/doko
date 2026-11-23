@@ -11,15 +11,18 @@ use doko::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::bindings::{CACHE, DB};
+use crate::bindings::{CACHE, DB, JOBS};
+use crate::jobs::CountWords;
 
-const TAG: &str = "notes";
+pub const TAG: &str = "notes";
 
 #[derive(Serialize, Deserialize)]
 struct Note {
     id: i64,
     body: String,
     created_at: String,
+    /// Set in the background by the CountWords job.
+    words: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -63,11 +66,12 @@ async fn create(ctx: Ctx, Json(new): Json<NewNote>) -> Result<(StatusCode, Json<
     if new.body.trim().is_empty() {
         return Err(Error::bad_request("body must not be empty"));
     }
-    let note = ctx
+    let note: Note = ctx
         .db(DB)?
         .first("INSERT INTO notes (body) VALUES (?1) RETURNING *", (&new.body,))
         .await?
         .ok_or_else(|| Error::internal("insert returned no row"))?;
+    ctx.enqueue(JOBS, &CountWords { id: note.id }).await?;
     ctx.cache().purge_tag(CACHE, TAG).await?;
     Ok((StatusCode::CREATED, Json(note)))
 }

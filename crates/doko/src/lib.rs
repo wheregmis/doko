@@ -16,13 +16,15 @@
 
 mod cache;
 mod error;
+mod jobs;
 mod log;
 mod storage;
 
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
 pub use error::{Error, Result};
-pub use storage::{Bucket, D1Binding, Db, Kv, KvBinding, R2Binding, Statement};
+pub use jobs::{Job, Jobs, Tasks};
+pub use storage::{Bucket, D1Binding, Db, Kv, KvBinding, QueueBinding, R2Binding, Statement};
 pub use worker;
 
 use std::{convert::Infallible, sync::Arc};
@@ -41,6 +43,8 @@ use worker::{Context, Env, HttpRequest, ScheduleContext, ScheduledEvent, send::S
 /// Var holding `[config]` from doko.toml, merged for the active environment.
 const CONFIG_VAR: &str = "DOKO_CONFIG";
 const ENV_VAR: &str = "DOKO_ENV";
+/// Var holding `[tasks]` (name → cron schedule) for the active environment.
+const TASKS_VAR: &str = "DOKO_TASKS";
 
 #[derive(Clone)]
 enum Exec {
@@ -124,9 +128,14 @@ pub trait Hooks: 'static {
     /// Your routes. doko adds request logging and an `x-request-id` header around them.
     fn routes() -> Router<Ctx>;
 
-    /// Runs on every cron trigger listed in `doko.toml` (`app.crons`).
-    fn on_scheduled(_ctx: Ctx, _event: ScheduledEvent) -> impl Future<Output = ()> {
-        async {}
+    /// Background jobs this worker consumes from its `[queues.*]`: `Jobs::new().add::<SendWelcome>()`.
+    fn jobs() -> Jobs {
+        Jobs::new()
+    }
+
+    /// Cron tasks by name; schedules come from doko.toml's `[tasks]`: `Tasks::new().add("cleanup", cleanup)`.
+    fn tasks() -> Tasks {
+        Tasks::new()
     }
 }
 
@@ -142,10 +151,19 @@ pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worke
 #[doc(hidden)]
 pub async fn scheduled<H: Hooks>(event: ScheduledEvent, env: Env, exec: ScheduleContext) {
     let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Scheduled(SendWrapper::new(exec)) };
-    H::on_scheduled(ctx, event).await
+    jobs::run_tasks(ctx, H::tasks(), event).await
 }
 
-/// Wires a [`Hooks`] type to the Workers fetch and scheduled events.
+#[doc(hidden)]
+pub async fn queue<H: Hooks>(batch: jobs::QueueBatch, env: Env, exec: Context) -> worker::Result<()> {
+    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
+    jobs::run_batch(ctx, H::jobs(), batch).await
+}
+
+#[doc(hidden)]
+pub use jobs::QueueBatch;
+
+/// Wires a [`Hooks`] type to the Workers fetch, scheduled and queue events.
 #[macro_export]
 macro_rules! app {
     ($app:ty) => {
@@ -165,6 +183,15 @@ macro_rules! app {
             ctx: ::worker::ScheduleContext,
         ) {
             $crate::scheduled::<$app>(event, env, ctx).await
+        }
+
+        #[::worker::event(queue)]
+        async fn __doko_queue(
+            batch: $crate::QueueBatch,
+            env: ::worker::Env,
+            ctx: ::worker::Context,
+        ) -> ::worker::Result<()> {
+            $crate::queue::<$app>(batch, env, ctx).await
         }
     };
 }
