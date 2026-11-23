@@ -64,6 +64,11 @@ No ORM in v1: D1 is SQLite, so serde row mapping plus raw SQL covers most needs.
 - Two-tier helper: Cache API as L1 (per colo), KV as L2 (global), configured per route in `doko.toml`.
 - Invalidation by key or tag (tags stored in KV).
 
+**Status (Phase 3 done):**
+- The policy is set in code with `.cache(Policy::...)`, not per route in doko.toml, so it's typed and sits next to the routes.
+- There's no KV second tier, since KV already caches hot reads at the edge.
+- `Vary` isn't supported: the cache key is the URL plus the tag versions.
+
 ### Phase 4: background workers
 - `#[doko::job]` on a struct implementing `perform(ctx)`, enqueued with `MyJob::enqueue(&ctx, args)`. Runs on Queues; `on_queue` routes each message to its job by name.
 - Retries and dead-letter queue settings in `doko.toml`.
