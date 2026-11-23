@@ -10,6 +10,8 @@ cargo install --path crates/doko-cli
 cd examples/hello && doko dev
 ```
 
+Or start a new app with `doko new my-app && cd my-app && doko dev`.
+
 `doko dev` / `doko deploy` regenerate `wrangler.toml` from `doko.toml`, then run wrangler. `doko config` only regenerates. Extra args go to wrangler.
 
 ## An app
@@ -63,6 +65,12 @@ doko generate controller posts
 ```
 
 This writes `src/controllers/posts.rs` and registers it in `src/controllers/mod.rs`. Add `mod controllers;` once, and `.merge(controllers::routes())` in `Hooks::routes`.
+
+```bash
+doko generate job send_welcome
+```
+
+This writes `src/jobs/send_welcome.rs` (a `SendWelcome` job) and registers it in `src/jobs/mod.rs`. Add `mod jobs;` once, and return `jobs::jobs()` from `Hooks::jobs`.
 
 ## Storage: KV, R2, D1
 
@@ -172,3 +180,25 @@ ctx.enqueue(JOBS, &CountWords { id }).await?;          // or enqueue_in(JOBS, &j
 - **Job logs.** Every attempt is logged as JSON, with the job name and attempt number.
 - **Cron triggers.** doko writes each env's cron triggers from its `[tasks]` schedules. On every trigger, it runs each task whose schedule matches.
 - **Testing a task locally:** `curl "localhost:8787/cdn-cgi/handler/scheduled?cron=0+3+*+*+*"`.
+
+## Integration tests
+
+`doko::test::App` runs your worker under `wrangler dev` (on a free port, with empty local state) and gives you an HTTP client. Enable it for tests only:
+
+```toml
+[dev-dependencies]
+doko = { ..., features = ["test"] }
+```
+
+```rust
+#[test]
+#[ignore = "starts wrangler dev"]
+fn creates_notes() {
+    let app = doko::test::App::start(&["DB"]);   // applies DB's migrations first
+    let res = app.post_json("/notes", &json!({ "body": "hi" }));
+    assert_eq!(res.status, 201);
+    let note: Note = res.json();
+}
+```
+
+Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).

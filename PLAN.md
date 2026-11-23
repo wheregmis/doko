@@ -85,6 +85,11 @@ No ORM in v1: D1 is SQLite, so serde row mapping plus raw SQL covers most needs.
 - Integration tests through `wrangler dev` / Miniflare, with a `doko::test` helper that starts a local worker and an HTTP client.
 - `doko deploy --env prod`.
 
+**Status (Phase 5 done):**
+- `doko new <app>` depends on doko by git until it is on crates.io.
+- `doko::test::App` drives `wrangler dev` directly rather than Miniflare's API, so tests need Node and run with `--ignored`.
+- `generate job` needs `src/jobs/mod.rs`; it refuses to touch a single-file `src/jobs.rs`.
+
 ### Later
 Durable Objects (sessions, rate limiting), auth (JWT/sessions), Hyperdrive/Postgres, Workers AI, email.
 
