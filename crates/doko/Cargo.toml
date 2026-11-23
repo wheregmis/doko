@@ -11,3 +11,8 @@ axum.workspace = true
 tower-service.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "3", default-features = false, optional = true }
+
+[features]
+# doko::test: integration tests against `wrangler dev`. Enable in [dev-dependencies] only.
+test = ["dep:ureq"]

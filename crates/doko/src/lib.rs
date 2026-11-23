@@ -19,6 +19,8 @@ mod error;
 mod jobs;
 mod log;
 mod storage;
+#[cfg(feature = "test")]
+pub mod test;
 
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
