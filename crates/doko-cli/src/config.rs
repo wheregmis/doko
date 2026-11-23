@@ -1,6 +1,6 @@
-//! `doko.toml` → `wrangler.toml`.
+//! `doko.toml` → `wrangler.toml` + `src/bindings.rs`.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Write};
 
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
@@ -16,6 +16,8 @@ struct DokoToml {
     /// App config, read at runtime with `ctx.config::<T>()`.
     #[serde(default)]
     config: Table,
+    #[serde(flatten)]
+    bindings: Bindings,
     #[serde(default)]
     env: BTreeMap<String, Env>,
 }
@@ -35,6 +37,44 @@ struct Env {
     /// Deep-merged over the top-level `[config]`.
     #[serde(default)]
     config: Table,
+    /// Each binding listed here replaces the top-level one of the same name.
+    #[serde(flatten)]
+    bindings: Bindings,
+}
+
+// Field names match wrangler's, so wrangler docs apply as-is.
+#[derive(Deserialize, Default, Clone)]
+struct Bindings {
+    #[serde(default)]
+    kv: BTreeMap<String, Kv>,
+    #[serde(default)]
+    r2: BTreeMap<String, R2>,
+    #[serde(default)]
+    d1: BTreeMap<String, D1>,
+}
+
+/// `id` is optional: wrangler simulates locally, and provisions on deploy.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Kv {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct R2 {
+    bucket_name: String,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct D1 {
+    database_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migrations_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -45,9 +85,10 @@ struct Wrangler<'a> {
     build: Build<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     triggers: Option<Triggers<'a>>,
-    vars: Vars,
+    #[serde(flatten)]
+    resources: Resources,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    env: BTreeMap<&'a str, WranglerEnv>,
+    env: BTreeMap<&'a str, Resources>,
 }
 
 #[derive(Serialize)]
@@ -60,10 +101,23 @@ struct Triggers<'a> {
     crons: &'a [String],
 }
 
-// Wrangler envs don't inherit vars, so every env gets its own fully merged copy.
+// Wrangler envs don't inherit vars or bindings, so every env gets a fully merged copy.
 #[derive(Serialize)]
-struct WranglerEnv {
+struct Resources {
     vars: Vars,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    kv_namespaces: Vec<Bound<Kv>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    r2_buckets: Vec<Bound<R2>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    d1_databases: Vec<Bound<D1>>,
+}
+
+#[derive(Serialize)]
+struct Bound<T> {
+    binding: String,
+    #[serde(flatten)]
+    inner: T,
 }
 
 #[derive(Serialize)]
@@ -73,23 +127,50 @@ struct Vars {
     DOKO_CONFIG: Table,
 }
 
-pub fn render(doko_toml: &str) -> Result<String, String> {
+pub struct Output {
+    pub wrangler_toml: String,
+    /// Contents of `src/bindings.rs`, when doko.toml declares any bindings.
+    pub bindings_rs: Option<String>,
+    /// D1 binding names, for `doko migrate`.
+    pub d1: Vec<String>,
+}
+
+pub fn render(doko_toml: &str) -> Result<Output, String> {
     let cfg: DokoToml = toml::from_str(doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
     for name in cfg.env.keys() {
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
             return Err(format!("doko.toml: env name `{name}` must be lowercase letters, digits or `-`"));
         }
     }
-    let vars_for = |env: &str| Vars {
-        DOKO_ENV: env.to_owned(),
-        DOKO_CONFIG: {
-            let mut merged = cfg.config.clone();
-            if let Some(e) = cfg.env.get(env) {
-                merge(&mut merged, &e.config);
-            }
-            merged
-        },
+    let resources_for = |env: &str| -> Result<(Resources, Bindings), String> {
+        let mut config = cfg.config.clone();
+        let mut b = cfg.bindings.clone();
+        if let Some(e) = cfg.env.get(env) {
+            merge(&mut config, &e.config);
+            b.kv.extend(e.bindings.kv.clone());
+            b.r2.extend(e.bindings.r2.clone());
+            b.d1.extend(e.bindings.d1.clone());
+        }
+        check_binding_names(&b).map_err(|e| format!("doko.toml{}: {e}", if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") }))?;
+        let r = Resources {
+            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config },
+            kv_namespaces: bound(&b.kv),
+            r2_buckets: bound(&b.r2),
+            d1_databases: bound(&b.d1),
+        };
+        Ok((r, b))
     };
+
+    let (resources, mut all) = resources_for(DEFAULT_ENV)?;
+    let mut env = BTreeMap::new();
+    // `dev` is the top level, not a wrangler env.
+    for name in cfg.env.keys().filter(|k| *k != DEFAULT_ENV) {
+        let (r, b) = resources_for(name)?;
+        all.kv.extend(b.kv);
+        all.r2.extend(b.r2);
+        all.d1.extend(b.d1);
+        env.insert(name.as_str(), r);
+    }
     let app = &cfg.app;
     let wrangler = Wrangler {
         name: &app.name,
@@ -97,12 +178,53 @@ pub fn render(doko_toml: &str) -> Result<String, String> {
         compatibility_date: &app.compatibility_date,
         build: Build { command: BUILD_COMMAND },
         triggers: (!app.crons.is_empty()).then_some(Triggers { crons: &app.crons }),
-        vars: vars_for(DEFAULT_ENV),
-        // `dev` is the top level, not a wrangler env.
-        env: cfg.env.keys().filter(|k| *k != DEFAULT_ENV).map(|k| (k.as_str(), WranglerEnv { vars: vars_for(k) })).collect(),
+        resources,
+        env,
     };
     let body = toml::to_string(&wrangler).map_err(|e| e.to_string())?;
-    Ok(format!("# Generated by doko from doko.toml. Do not edit.\n{body}"))
+    Ok(Output {
+        wrangler_toml: format!("# Generated by doko from doko.toml. Do not edit.\n{body}"),
+        bindings_rs: bindings_rs(&all),
+        d1: all.d1.into_keys().collect(),
+    })
+}
+
+fn bound<T: Clone>(m: &BTreeMap<String, T>) -> Vec<Bound<T>> {
+    m.iter().map(|(k, v)| Bound { binding: k.clone(), inner: v.clone() }).collect()
+}
+
+fn check_binding_names(b: &Bindings) -> Result<(), String> {
+    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys());
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !valid {
+            return Err(format!("binding `{name}` must be UPPER_SNAKE_CASE"));
+        }
+        if name.starts_with("DOKO_") {
+            return Err(format!("binding `{name}`: the DOKO_ prefix is reserved"));
+        }
+        if !seen.insert(name) {
+            return Err(format!("binding `{name}` is declared more than once"));
+        }
+    }
+    Ok(())
+}
+
+fn bindings_rs(b: &Bindings) -> Option<String> {
+    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() {
+        return None;
+    }
+    let mut s = String::from("//! Generated by doko from doko.toml. Do not edit.\n#![allow(dead_code)]\n\n");
+    let kinds: [(&str, Vec<&String>); 3] =
+        [("Kv", b.kv.keys().collect()), ("R2", b.r2.keys().collect()), ("D1", b.d1.keys().collect())];
+    for (kind, names) in kinds {
+        for name in names {
+            let _ = writeln!(s, "pub const {name}: doko::{kind}Binding = doko::{kind}Binding::new(\"{name}\");");
+        }
+    }
+    Some(s)
 }
 
 fn merge(base: &mut Table, over: &Table) {
@@ -122,8 +244,16 @@ mod tests {
 
     const APP: &str = "[app]\nname = \"hello\"\ncompatibility_date = \"2026-11-01\"\n";
 
+    fn out(extra: &str) -> Output {
+        render(&format!("{APP}{extra}")).unwrap()
+    }
+
     fn parse(extra: &str) -> Table {
-        toml::from_str(&render(&format!("{APP}{extra}")).unwrap()).unwrap()
+        toml::from_str(&out(extra).wrangler_toml).unwrap()
+    }
+
+    fn err(extra: &str) -> String {
+        render(&format!("{APP}{extra}")).err().expect("expected an error")
     }
 
     #[test]
@@ -134,7 +264,10 @@ mod tests {
         assert_eq!(v["build"]["command"].as_str(), Some(BUILD_COMMAND));
         assert_eq!(v["vars"]["DOKO_ENV"].as_str(), Some("dev"));
         assert!(v["vars"]["DOKO_CONFIG"].as_table().unwrap().is_empty());
-        assert!(!v.contains_key("triggers") && !v.contains_key("env"));
+        for key in ["triggers", "env", "kv_namespaces", "r2_buckets", "d1_databases"] {
+            assert!(!v.contains_key(key), "{key}");
+        }
+        assert!(out("").bindings_rs.is_none());
     }
 
     #[test]
@@ -160,16 +293,60 @@ mod tests {
         assert_eq!(prod["DOKO_CONFIG"]["db"]["name"].as_str(), Some("a"));
     }
 
+    const BINDINGS: &str = "\
+[kv.CACHE]
+[r2.FILES]
+bucket_name = \"files-dev\"
+[d1.DB]
+database_name = \"app-dev\"
+[env.prod.kv.CACHE]
+id = \"abc\"
+[env.prod.r2.FILES]
+bucket_name = \"files-prod\"
+";
+
+    #[test]
+    fn renders_bindings_into_every_env() {
+        let v = parse(BINDINGS);
+        assert_eq!(v["kv_namespaces"][0]["binding"].as_str(), Some("CACHE"));
+        assert!(v["kv_namespaces"][0].get("id").is_none());
+        assert_eq!(v["r2_buckets"][0]["bucket_name"].as_str(), Some("files-dev"));
+        assert_eq!(v["d1_databases"][0]["database_name"].as_str(), Some("app-dev"));
+        let prod = &v["env"]["prod"];
+        assert_eq!(prod["kv_namespaces"][0]["id"].as_str(), Some("abc"));
+        assert_eq!(prod["r2_buckets"][0]["bucket_name"].as_str(), Some("files-prod"));
+        assert_eq!(prod["d1_databases"][0]["database_name"].as_str(), Some("app-dev"), "inherited");
+    }
+
+    #[test]
+    fn generates_typed_bindings() {
+        let o = out(BINDINGS);
+        let rs = o.bindings_rs.unwrap();
+        assert!(rs.contains("pub const CACHE: doko::KvBinding = doko::KvBinding::new(\"CACHE\");"), "{rs}");
+        assert!(rs.contains("pub const FILES: doko::R2Binding"), "{rs}");
+        assert!(rs.contains("pub const DB: doko::D1Binding"), "{rs}");
+        assert_eq!(o.d1, ["DB"]);
+    }
+
+    #[test]
+    fn rejects_bad_bindings() {
+        assert!(err("[kv.cache]\n").contains("UPPER_SNAKE_CASE"));
+        assert!(err("[kv.DOKO_X]\n").contains("reserved"));
+        assert!(err("[kv.X]\n[r2.X]\nbucket_name = \"b\"\n").contains("more than once"));
+        assert!(err("[r2.X]\n").contains("bucket_name"));
+        assert!(err("[env.prod.kv.bad]\n").contains("[env.prod]"));
+    }
+
     #[test]
     fn rejects_typos() {
-        let err = render("[app]\nname = \"a\"\ncompatibilty_date = \"x\"\n").unwrap_err();
-        assert!(err.contains("compatibilty_date"), "{err}");
-        let err = render(&format!("{APP}[env.prod]\nconfg = {{}}\n")).unwrap_err();
-        assert!(err.contains("confg"), "{err}");
+        let e = render("[app]\nname = \"a\"\ncompatibilty_date = \"x\"\n").err().unwrap();
+        assert!(e.contains("compatibilty_date"), "{e}");
+        assert!(err("[env.prod]\nconfg = {}\n").contains("confg"));
+        assert!(err("[kv.X]\nidd = \"1\"\n").contains("idd"));
     }
 
     #[test]
     fn rejects_bad_env_names() {
-        assert!(render(&format!("{APP}[env.Prod]\n")).unwrap_err().contains("Prod"));
+        assert!(err("[env.Prod]\n").contains("Prod"));
     }
 }

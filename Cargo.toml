@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 doko = { path = "crates/doko" }
-worker = { version = "0.9", features = ["http", "axum"] }
+worker = { version = "0.9", features = ["http", "axum", "d1"] }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "macros"] }
 tower-service = "0.3"
 serde = { version = "1", features = ["derive"] }
