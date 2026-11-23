@@ -33,7 +33,6 @@ The app crate needs `crate-type = ["cdylib"]` and must depend on `worker` direct
 [app]
 name = "my-app"
 compatibility_date = "2026-11-01"
-crons = ["*/30 * * * *"]   # optional, calls Hooks::on_scheduled
 ```
 
 ## Config and environments
@@ -135,3 +134,41 @@ let n = ctx.cache().get_or_set("notes:count", 30, async { count(&db).await }).aw
 **How tag purges work.** Each tag stores a version number in the KV namespace you pass, and that version is part of the cache key. A purge bumps the version, so every data center misses on its next lookup. This is global, but takes up to about 60s, which is how long KV writes take to propagate.
 
 **The Cache API does nothing on `*.workers.dev`.** Production needs a custom domain.
+
+## Background jobs and cron tasks
+
+```toml
+[queues.JOBS]                       # this worker sends to and consumes this queue
+queue = "my-app-jobs"
+max_retries = 3                     # wrangler consumer settings: max_batch_size,
+dead_letter_queue = "my-app-dlq"    # max_batch_timeout, retry_delay, max_concurrency
+
+[tasks]                             # name = cron schedule
+prune = "0 3 * * *"
+
+[env.prod.tasks]
+prune = "0 4 * * *"
+```
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct CountWords { id: i64 }
+
+impl Job for CountWords {
+    const NAME: &'static str = "count_words";   // stored in each message: don't rename casually
+    async fn perform(self, ctx: Ctx) -> Result<()> { /* ... */ Ok(()) }
+}
+
+impl Hooks for App {
+    fn jobs() -> Jobs { Jobs::new().add::<CountWords>() }
+    fn tasks() -> Tasks { Tasks::new().add("prune", prune) }   // async fn prune(ctx: Ctx) -> Result<()>
+    // ...
+}
+
+ctx.enqueue(JOBS, &CountWords { id }).await?;          // or enqueue_in(JOBS, &job, delay_secs)
+```
+
+- **Failed jobs.** A job that returns `Err` is retried, and after `max_retries` it moves to the `dead_letter_queue`. Make `perform` safe to run more than once.
+- **Job logs.** Every attempt is logged as JSON, with the job name and attempt number.
+- **Cron triggers.** doko writes each env's cron triggers from its `[tasks]` schedules. On every trigger, it runs each task whose schedule matches.
+- **Testing a task locally:** `curl "localhost:8787/cdn-cgi/handler/scheduled?cron=0+3+*+*+*"`.

@@ -1,7 +1,6 @@
 [app]
 name = "doko-hello"
 compatibility_date = "2026-11-01"
-crons = ["*/30 * * * *"]
 
 # Read at runtime with ctx.config::<Config>(). [env.<name>.config] is deep-merged over it.
 [config]
@@ -9,6 +8,13 @@ greeting = "hello from doko"
 
 [env.prod.config]
 greeting = "hello from doko (prod)"
+
+# Cron tasks: name = schedule. Handlers are registered in Hooks::tasks.
+[tasks]
+prune = "*/30 * * * *"
+
+[env.prod.tasks]
+prune = "0 3 * * *"
 
 # Bindings. Names become constants in src/bindings.rs. Fields match wrangler's.
 # IDs are optional locally; set them per env once the resources exist.
@@ -19,3 +25,10 @@ bucket_name = "doko-hello-files"
 
 [d1.DB]
 database_name = "doko-hello"
+
+# A queue this worker sends jobs to and consumes (Hooks::jobs). Fields match wrangler's consumer settings.
+[queues.JOBS]
+queue = "doko-hello-jobs"
+max_batch_timeout = 1
+max_retries = 2
+dead_letter_queue = "doko-hello-jobs-dlq"

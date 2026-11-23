@@ -16,6 +16,9 @@ struct DokoToml {
     /// App config, read at runtime with `ctx.config::<T>()`.
     #[serde(default)]
     config: Table,
+    /// Cron tasks: `name = "schedule"`. Handlers are registered in `Hooks::tasks`.
+    #[serde(default)]
+    tasks: BTreeMap<String, String>,
     #[serde(flatten)]
     bindings: Bindings,
     #[serde(default)]
@@ -27,8 +30,6 @@ struct DokoToml {
 struct App {
     name: String,
     compatibility_date: String,
-    #[serde(default)]
-    crons: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +38,9 @@ struct Env {
     /// Deep-merged over the top-level `[config]`.
     #[serde(default)]
     config: Table,
+    /// Each task listed here replaces the top-level schedule of the same name.
+    #[serde(default)]
+    tasks: BTreeMap<String, String>,
     /// Each binding listed here replaces the top-level one of the same name.
     #[serde(flatten)]
     bindings: Bindings,
@@ -51,6 +55,8 @@ struct Bindings {
     r2: BTreeMap<String, R2>,
     #[serde(default)]
     d1: BTreeMap<String, D1>,
+    #[serde(default)]
+    queues: BTreeMap<String, Queue>,
 }
 
 /// `id` is optional: wrangler simulates locally, and provisions on deploy.
@@ -77,14 +83,44 @@ struct D1 {
     migrations_dir: Option<String>,
 }
 
+/// A queue this worker both sends to (as the binding) and consumes (running `Hooks::jobs`).
+/// Serialized as wrangler's `[[queues.consumers]]` entry.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Queue {
+    queue: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_batch_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_batch_timeout: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_retries: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_delay: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead_letter_queue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_concurrency: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct Queues {
+    producers: Vec<Producer>,
+    consumers: Vec<Queue>,
+}
+
+#[derive(Serialize)]
+struct Producer {
+    binding: String,
+    queue: String,
+}
+
 #[derive(Serialize)]
 struct Wrangler<'a> {
     name: &'a str,
     main: &'a str,
     compatibility_date: &'a str,
     build: Build<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    triggers: Option<Triggers<'a>>,
     #[serde(flatten)]
     resources: Resources,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -97,13 +133,15 @@ struct Build<'a> {
 }
 
 #[derive(Serialize)]
-struct Triggers<'a> {
-    crons: &'a [String],
+struct Triggers {
+    crons: Vec<String>,
 }
 
 // Wrangler envs don't inherit vars or bindings, so every env gets a fully merged copy.
 #[derive(Serialize)]
 struct Resources {
+    // Always written, even empty: wrangler envs inherit triggers, and doko owns the schedule.
+    triggers: Triggers,
     vars: Vars,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     kv_namespaces: Vec<Bound<Kv>>,
@@ -111,6 +149,8 @@ struct Resources {
     r2_buckets: Vec<Bound<R2>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     d1_databases: Vec<Bound<D1>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queues: Option<Queues>,
 }
 
 #[derive(Serialize)]
@@ -125,6 +165,7 @@ struct Bound<T> {
 struct Vars {
     DOKO_ENV: String,
     DOKO_CONFIG: Table,
+    DOKO_TASKS: BTreeMap<String, String>,
 }
 
 pub struct Output {
@@ -145,18 +186,32 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
     let resources_for = |env: &str| -> Result<(Resources, Bindings), String> {
         let mut config = cfg.config.clone();
         let mut b = cfg.bindings.clone();
+        let mut tasks = cfg.tasks.clone();
         if let Some(e) = cfg.env.get(env) {
             merge(&mut config, &e.config);
+            tasks.extend(e.tasks.clone());
+            b.queues.extend(e.bindings.queues.clone());
             b.kv.extend(e.bindings.kv.clone());
             b.r2.extend(e.bindings.r2.clone());
             b.d1.extend(e.bindings.d1.clone());
         }
-        check_binding_names(&b).map_err(|e| format!("doko.toml{}: {e}", if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") }))?;
+        let at = if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") };
+        check_binding_names(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
+        check_tasks(&tasks).map_err(|e| format!("doko.toml{at}: {e}"))?;
+        let mut crons: Vec<String> = tasks.values().cloned().collect();
+        crons.sort();
+        crons.dedup();
+        let queues = (!b.queues.is_empty()).then(|| Queues {
+            producers: b.queues.iter().map(|(k, q)| Producer { binding: k.clone(), queue: q.queue.clone() }).collect(),
+            consumers: b.queues.values().cloned().collect(),
+        });
         let r = Resources {
-            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config },
+            triggers: Triggers { crons },
+            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config, DOKO_TASKS: tasks },
             kv_namespaces: bound(&b.kv),
             r2_buckets: bound(&b.r2),
             d1_databases: bound(&b.d1),
+            queues,
         };
         Ok((r, b))
     };
@@ -169,6 +224,7 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
         all.kv.extend(b.kv);
         all.r2.extend(b.r2);
         all.d1.extend(b.d1);
+        all.queues.extend(b.queues);
         env.insert(name.as_str(), r);
     }
     let app = &cfg.app;
@@ -177,7 +233,6 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
         main: "build/index.js",
         compatibility_date: &app.compatibility_date,
         build: Build { command: BUILD_COMMAND },
-        triggers: (!app.crons.is_empty()).then_some(Triggers { crons: &app.crons }),
         resources,
         env,
     };
@@ -193,8 +248,21 @@ fn bound<T: Clone>(m: &BTreeMap<String, T>) -> Vec<Bound<T>> {
     m.iter().map(|(k, v)| Bound { binding: k.clone(), inner: v.clone() }).collect()
 }
 
+fn check_tasks(tasks: &BTreeMap<String, String>) -> Result<(), String> {
+    for (name, schedule) in tasks {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return Err(format!("task `{name}` must be lowercase letters, digits, `_` or `-`"));
+        }
+        // Workers cron: 5 fields (minute hour day month weekday).
+        if schedule.split_whitespace().count() != 5 {
+            return Err(format!("task `{name}`: schedule `{schedule}` must have 5 fields, e.g. \"0 3 * * *\""));
+        }
+    }
+    Ok(())
+}
+
 fn check_binding_names(b: &Bindings) -> Result<(), String> {
-    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys());
+    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys());
     let mut seen = std::collections::BTreeSet::new();
     for name in names {
         let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
@@ -213,12 +281,16 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
 }
 
 fn bindings_rs(b: &Bindings) -> Option<String> {
-    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() {
+    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() {
         return None;
     }
     let mut s = String::from("//! Generated by doko from doko.toml. Do not edit.\n#![allow(dead_code)]\n\n");
-    let kinds: [(&str, Vec<&String>); 3] =
-        [("Kv", b.kv.keys().collect()), ("R2", b.r2.keys().collect()), ("D1", b.d1.keys().collect())];
+    let kinds: [(&str, Vec<&String>); 4] = [
+        ("Kv", b.kv.keys().collect()),
+        ("R2", b.r2.keys().collect()),
+        ("D1", b.d1.keys().collect()),
+        ("Queue", b.queues.keys().collect()),
+    ];
     for (kind, names) in kinds {
         for name in names {
             let _ = writeln!(s, "pub const {name}: doko::{kind}Binding = doko::{kind}Binding::new(\"{name}\");");
@@ -264,16 +336,49 @@ mod tests {
         assert_eq!(v["build"]["command"].as_str(), Some(BUILD_COMMAND));
         assert_eq!(v["vars"]["DOKO_ENV"].as_str(), Some("dev"));
         assert!(v["vars"]["DOKO_CONFIG"].as_table().unwrap().is_empty());
-        for key in ["triggers", "env", "kv_namespaces", "r2_buckets", "d1_databases"] {
+        assert!(v["triggers"]["crons"].as_array().unwrap().is_empty());
+        assert!(v["vars"]["DOKO_TASKS"].as_table().unwrap().is_empty());
+        for key in ["env", "kv_namespaces", "r2_buckets", "d1_databases", "queues"] {
             assert!(!v.contains_key(key), "{key}");
         }
         assert!(out("").bindings_rs.is_none());
     }
 
     #[test]
-    fn renders_crons() {
-        let v = parse("crons = [\"*/5 * * * *\"]\n");
-        assert_eq!(v["triggers"]["crons"][0].as_str(), Some("*/5 * * * *"));
+    fn renders_tasks_per_env() {
+        let v = parse(
+            "[tasks]\ncleanup = \"0 3 * * *\"\ndigest = \"0 3 * * *\"\nping = \"*/5 * * * *\"\n\
+             [env.prod.tasks]\nping = \"0 * * * *\"\n[env.staging]\n",
+        );
+        assert_eq!(v["triggers"]["crons"].as_array().unwrap().len(), 2, "schedules are deduped");
+        assert_eq!(v["vars"]["DOKO_TASKS"]["ping"].as_str(), Some("*/5 * * * *"));
+        let prod = &v["env"]["prod"];
+        assert_eq!(prod["vars"]["DOKO_TASKS"]["ping"].as_str(), Some("0 * * * *"));
+        assert_eq!(prod["vars"]["DOKO_TASKS"]["cleanup"].as_str(), Some("0 3 * * *"), "inherited");
+        assert!(prod["triggers"]["crons"].as_array().unwrap().contains(&"0 * * * *".into()));
+        assert_eq!(v["env"]["staging"]["triggers"]["crons"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rejects_bad_tasks() {
+        assert!(err("[tasks]\nCleanup = \"0 3 * * *\"\n").contains("lowercase"));
+        assert!(err("[tasks]\ncleanup = \"daily\"\n").contains("5 fields"));
+    }
+
+    #[test]
+    fn renders_queues() {
+        let o = out("[queues.JOBS]\nqueue = \"jobs\"\nmax_retries = 3\ndead_letter_queue = \"jobs-dlq\"\n[env.prod.queues.JOBS]\nqueue = \"jobs-prod\"\n");
+        let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
+        let q = &v["queues"];
+        assert_eq!(q["producers"][0]["binding"].as_str(), Some("JOBS"));
+        assert_eq!(q["producers"][0]["queue"].as_str(), Some("jobs"));
+        assert_eq!(q["consumers"][0]["queue"].as_str(), Some("jobs"));
+        assert_eq!(q["consumers"][0]["max_retries"].as_integer(), Some(3));
+        assert_eq!(q["consumers"][0]["dead_letter_queue"].as_str(), Some("jobs-dlq"));
+        assert!(q["consumers"][0].get("max_batch_size").is_none());
+        assert_eq!(v["env"]["prod"]["queues"]["consumers"][0]["queue"].as_str(), Some("jobs-prod"));
+        assert!(o.bindings_rs.unwrap().contains("pub const JOBS: doko::QueueBinding"));
+        assert!(err("[queues.JOBS]\nqueue = \"j\"\nretries = 1\n").contains("retries"));
     }
 
     #[test]
