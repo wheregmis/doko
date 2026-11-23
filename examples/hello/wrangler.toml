@@ -15,8 +15,30 @@ DOKO_ENV = "dev"
 [vars.DOKO_CONFIG]
 greeting = "hello from doko"
 
+[[kv_namespaces]]
+binding = "CACHE"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "doko-hello-files"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "doko-hello"
+
 [env.prod.vars]
 DOKO_ENV = "prod"
 
 [env.prod.vars.DOKO_CONFIG]
 greeting = "hello from doko (prod)"
+
+[[env.prod.kv_namespaces]]
+binding = "CACHE"
+
+[[env.prod.r2_buckets]]
+binding = "FILES"
+bucket_name = "doko-hello-files"
+
+[[env.prod.d1_databases]]
+binding = "DB"
+database_name = "doko-hello"

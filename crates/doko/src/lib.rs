@@ -16,9 +16,11 @@
 
 mod error;
 mod log;
+mod storage;
 
 pub use axum;
 pub use error::{Error, Result};
+pub use storage::{Bucket, D1Binding, Db, Kv, KvBinding, R2Binding, Statement};
 pub use worker;
 
 use std::{convert::Infallible, sync::Arc};
@@ -76,6 +78,21 @@ impl Ctx {
     /// The app's `[config]` from doko.toml, deserialized into your type.
     pub fn config<T: DeserializeOwned>(&self) -> Result<T> {
         self.env.object_var(CONFIG_VAR).map_err(|e| Error::internal(format!("invalid [config]: {e}")))
+    }
+
+    /// A KV namespace: `ctx.kv(bindings::CACHE)?`.
+    pub fn kv(&self, binding: KvBinding) -> Result<Kv> {
+        Ok(Kv(SendWrapper::new(self.env.kv(binding.0).map_err(storage::missing(binding.0))?)))
+    }
+
+    /// An R2 bucket: `ctx.bucket(bindings::FILES)?`.
+    pub fn bucket(&self, binding: R2Binding) -> Result<Bucket> {
+        Ok(Bucket(SendWrapper::new(self.env.bucket(binding.0).map_err(storage::missing(binding.0))?)))
+    }
+
+    /// A D1 database: `ctx.db(bindings::DB)?`.
+    pub fn db(&self, binding: D1Binding) -> Result<Db> {
+        Ok(Db(SendWrapper::new(self.env.d1(binding.0).map_err(storage::missing(binding.0))?)))
     }
 
     /// Runs `fut` after the response is sent, keeping the worker alive until it finishes.

@@ -64,3 +64,46 @@ doko generate controller posts
 ```
 
 This writes `src/controllers/posts.rs` and registers it in `src/controllers/mod.rs`. Add `mod controllers;` once, and `.merge(controllers::routes())` in `Hooks::routes`.
+
+## Storage: KV, R2, D1
+
+Declare bindings in doko.toml. The fields match wrangler's, and IDs are optional locally:
+
+```toml
+[kv.CACHE]
+
+[r2.FILES]
+bucket_name = "my-files"
+
+[d1.DB]
+database_name = "my-db"
+
+[env.prod.kv.CACHE]       # replaces the top-level CACHE in prod
+id = "<namespace id>"
+```
+
+`doko config` (and `dev`, `deploy` and `migrate`) writes every binding into every wrangler env, plus a typed `src/bindings.rs` with one constant per binding. Add `mod bindings;` once:
+
+```rust
+use crate::bindings::{CACHE, DB, FILES};
+
+let notes: Vec<Note> = ctx.db(DB)?.all("SELECT * FROM notes WHERE owner = ?1", (owner,)).await?;
+ctx.kv(CACHE)?.put_ttl("notes", &notes, 60).await?;
+ctx.bucket(FILES)?.serve("logo.png").await   // streams with content-type + etag, or 404
+```
+
+| | Methods |
+|---|---|
+| `Kv` | `get::<T>`, `put`, `put_ttl`, `delete` (values are JSON) |
+| `Bucket` | `serve`, `get_bytes`, `put(key, bytes, content_type)`, `delete` |
+| `Db` | `all::<T>`, `first::<T>`, `run` (returns `changes`, `last_row_id`), `statement` + `batch` (one transaction) |
+
+D1 params are a tuple bound to `?1`, `?2` and so on: `(id,)`, `(name, age)` or `()`. Each wrapper has `.raw()` for the full `worker` API.
+
+### Migrations
+
+```bash
+doko generate migration create_notes    # migrations/0001_create_notes.sql
+doko migrate                            # apply locally
+doko migrate --remote --env prod        # apply to the prod database
+```

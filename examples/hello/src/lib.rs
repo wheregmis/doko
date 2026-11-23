@@ -1,3 +1,4 @@
+mod bindings;
 mod controllers;
 
 use doko::{

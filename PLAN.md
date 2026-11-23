@@ -53,6 +53,11 @@ doko/
 
 No ORM in v1: D1 is SQLite, so serde row mapping plus raw SQL covers most needs.
 
+**Status (Phase 2 done):**
+- Bindings are declared as `[kv|r2|d1.NAME]`, generating typed constants in `src/bindings.rs`.
+- There's no KV key prefix per env, since each env can point at its own namespace instead.
+- R2 uploads are buffered rather than streamed, and multipart is only available through `.raw()`.
+
 ### Phase 3: cache
 - Cache API wrapper: `ctx.cache().get_or_set(key, ttl, || async { ... })`.
 - `CacheLayer` tower middleware caching GET responses by route, with TTL, `Vary`, and stale-while-revalidate via `wait_until`.

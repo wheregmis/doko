@@ -9,3 +9,13 @@ greeting = "hello from doko"
 
 [env.prod.config]
 greeting = "hello from doko (prod)"
+
+# Bindings. Names become constants in src/bindings.rs. Fields match wrangler's.
+# IDs are optional locally; set them per env once the resources exist.
+[kv.CACHE]
+
+[r2.FILES]
+bucket_name = "doko-hello-files"
+
+[d1.DB]
+database_name = "doko-hello"
