@@ -14,11 +14,13 @@
 //!
 //! The app crate must also depend on `worker` directly: worker's `#[event]` macro expands to `::worker::` paths.
 
+mod cache;
 mod error;
 mod log;
 mod storage;
 
 pub use axum;
+pub use cache::{Cache, Policy, RouterExt};
 pub use error::{Error, Result};
 pub use storage::{Bucket, D1Binding, Db, Kv, KvBinding, R2Binding, Statement};
 pub use worker;
@@ -95,6 +97,11 @@ impl Ctx {
         Ok(Db(SendWrapper::new(self.env.d1(binding.0).map_err(storage::missing(binding.0))?)))
     }
 
+    /// The edge cache (Cache API) for JSON values. For whole responses, see [`RouterExt::cache`].
+    pub fn cache(&self) -> Cache {
+        Cache::new(self.clone())
+    }
+
     /// Runs `fut` after the response is sent, keeping the worker alive until it finishes.
     pub fn wait_until(&self, fut: impl Future<Output = ()> + 'static) {
         match &self.exec {
@@ -126,6 +133,9 @@ pub trait Hooks: 'static {
 #[doc(hidden)]
 pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worker::Result<Response<Body>> {
     let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
+    // Middleware (e.g. the response cache) reads Ctx from here; handlers get it as state.
+    let mut req = req;
+    req.extensions_mut().insert(ctx.clone());
     Ok(H::routes().layer(middleware::from_fn(log::requests)).with_state(ctx).call(req).await?)
 }
 

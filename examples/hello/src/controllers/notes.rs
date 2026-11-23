@@ -1,7 +1,7 @@
-//! Notes in D1, with the list cached in KV.
+//! Notes in D1. GET responses are edge-cached and purged by tag on writes.
 
 use doko::{
-    Ctx, Error, Result,
+    Ctx, Error, Policy, Result, RouterExt,
     axum::{
         Json, Router,
         extract::Path,
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bindings::{CACHE, DB};
 
-const LIST_KEY: &str = "notes:all";
+const TAG: &str = "notes";
 
 #[derive(Serialize, Deserialize)]
 struct Note {
@@ -31,16 +31,27 @@ pub fn routes() -> Router<Ctx> {
     Router::new()
         .route("/notes", get(index).post(create))
         .route("/notes/{id}", get(show).delete(destroy))
+        // Only GETs are cached; POST/DELETE pass through and purge the tag.
+        .cache(Policy::ttl(60).stale_while_revalidate(300).tags(CACHE, &[TAG]))
+        // Added after .cache(), so it uses value caching instead.
+        .route("/notes/count", get(count))
 }
 
 async fn index(ctx: Ctx) -> Result<Json<Vec<Note>>> {
-    let cache = ctx.kv(CACHE)?;
-    if let Some(notes) = cache.get(LIST_KEY).await? {
-        return Ok(Json(notes));
-    }
-    let notes: Vec<Note> = ctx.db(DB)?.all("SELECT * FROM notes ORDER BY id", ()).await?;
-    cache.put_ttl(LIST_KEY, &notes, 60).await?;
-    Ok(Json(notes))
+    Ok(Json(ctx.db(DB)?.all("SELECT * FROM notes ORDER BY id", ()).await?))
+}
+
+/// Value caching: the count is computed at most once per 30s per data center.
+async fn count(ctx: Ctx) -> Result<Json<i64>> {
+    let db = ctx.db(DB)?;
+    let n = ctx
+        .cache()
+        .get_or_set("notes:count", 30, async {
+            let row: Option<serde_json::Value> = db.first("SELECT COUNT(*) AS n FROM notes", ()).await?;
+            Ok(row.and_then(|r| r["n"].as_i64()).unwrap_or(0))
+        })
+        .await?;
+    Ok(Json(n))
 }
 
 async fn show(ctx: Ctx, Path(id): Path<i64>) -> Result<Json<Note>> {
@@ -57,7 +68,7 @@ async fn create(ctx: Ctx, Json(new): Json<NewNote>) -> Result<(StatusCode, Json<
         .first("INSERT INTO notes (body) VALUES (?1) RETURNING *", (&new.body,))
         .await?
         .ok_or_else(|| Error::internal("insert returned no row"))?;
-    ctx.kv(CACHE)?.delete(LIST_KEY).await?;
+    ctx.cache().purge_tag(CACHE, TAG).await?;
     Ok((StatusCode::CREATED, Json(note)))
 }
 
@@ -66,6 +77,6 @@ async fn destroy(ctx: Ctx, Path(id): Path<i64>) -> Result<StatusCode> {
     if meta.changes == Some(0) {
         return Err(Error::not_found());
     }
-    ctx.kv(CACHE)?.delete(LIST_KEY).await?;
+    ctx.cache().purge_tag(CACHE, TAG).await?;
     Ok(StatusCode::NO_CONTENT)
 }
