@@ -1,0 +1,11 @@
+[app]
+name = "doko-hello"
+compatibility_date = "2026-11-01"
+crons = ["*/30 * * * *"]
+
+# Read at runtime with ctx.config::<Config>(). [env.<name>.config] is deep-merged over it.
+[config]
+greeting = "hello from doko"
+
+[env.prod.config]
+greeting = "hello from doko (prod)"

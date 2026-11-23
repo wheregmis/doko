@@ -1,0 +1,15 @@
+[package]
+name = "hello"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+doko.workspace = true
+# required: worker's #[event] macro expands to ::worker paths
+worker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
