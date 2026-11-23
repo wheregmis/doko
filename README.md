@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/doko.svg" width="128" height="128" alt="doko logo: a woven bamboo basket with a red strap">
+  <img src="assets/doko.svg" width="128" height="128" alt="doko logo: a woven bamboo basket carried by one strap">
 </p>
 
 <h1 align="center">doko</h1>

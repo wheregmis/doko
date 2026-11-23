@@ -5,29 +5,23 @@
       <path d="M27 46 Q33 84 55 110 L73 110 Q95 84 101 46 Z"/>
     </clipPath>
   </defs>
-  <!-- tile: Nepal-flag blue, so the icon reads on light and dark backgrounds -->
-  <rect width="128" height="128" rx="28" fill="#0B3D91"/>
+  <rect width="128" height="128" rx="28" fill="#fff"/>
 
-  <!-- namlo: the one strap that carries the load -->
-  <path d="M32 50 C28 12 100 12 96 50" fill="none" stroke="#FFF4E0" stroke-width="9" stroke-linecap="round"/>
-  <path d="M32 50 C28 12 100 12 96 50" fill="none" stroke="#DC143C" stroke-width="5" stroke-linecap="round"/>
+  <g fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">
+    <!-- weave -->
+    <g clip-path="url(#body)" stroke-width="2">
+      <path d="M10 40 L60 120 M22 40 L72 120 M34 40 L84 120 M46 40 L96 120 M58 40 L108 120 M70 40 L120 120"/>
+      <path d="M118 40 L68 120 M106 40 L56 120 M94 40 L44 120 M82 40 L32 120 M70 40 L20 120 M58 40 L8 120"/>
+      <path d="M20 64 H108 M20 86 H108" stroke-width="4"/>
+    </g>
 
-  <!-- basket body -->
-  <path d="M27 46 Q33 84 55 110 L73 110 Q95 84 101 46 Z" fill="#D9A15B"/>
-  <g clip-path="url(#body)" stroke="#9A6430" stroke-width="2" fill="none" stroke-linecap="round">
-    <!-- diagonal weave -->
-    <path d="M10 40 L60 120 M22 40 L72 120 M34 40 L84 120 M46 40 L96 120 M58 40 L108 120 M70 40 L120 120"/>
-    <path d="M118 40 L68 120 M106 40 L56 120 M94 40 L44 120 M82 40 L32 120 M70 40 L20 120 M58 40 L8 120"/>
+    <!-- outline, rim and foot -->
+    <path d="M27 46 Q33 84 55 110 L73 110 Q95 84 101 46" stroke-width="4"/>
+    <ellipse cx="64" cy="46" rx="38" ry="7" fill="#fff" stroke-width="4"/>
+    <rect x="53" y="108" width="22" height="7" rx="2.5" fill="#000" stroke-width="2"/>
+
+    <!-- namlo: a thin rope with a wide forehead band, tied to the rim -->
+    <path d="M28 47 C20 4 108 4 100 47" stroke-width="2.5"/>
+    <path d="M46 17.5 Q64 11 82 17.5" stroke-width="9" stroke-linecap="butt"/>
   </g>
-  <g clip-path="url(#body)" stroke="#7A4A22" stroke-width="3.5">
-    <!-- horizontal bands -->
-    <path d="M20 64 H108 M20 86 H108"/>
-  </g>
-
-  <!-- rim -->
-  <ellipse cx="64" cy="46" rx="38" ry="7" fill="#7A4A22"/>
-  <ellipse cx="64" cy="45" rx="34" ry="4.5" fill="#4A2C14"/>
-
-  <!-- foot -->
-  <rect x="53" y="107" width="22" height="8" rx="2.5" fill="#7A4A22"/>
 </svg>
