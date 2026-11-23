@@ -35,6 +35,14 @@ doko/
 - Built-in middleware: request id, structured logging (`console_log`), CORS, JSON error type (`doko::Error` → `IntoResponse`), request timeouts.
 - `doko generate controller posts` produces the module and registers its routes.
 
+**Status (Phases 0–1 done):**
+- `doko::app!(App)` is a `macro_rules!` macro, so there's no proc-macro crate yet.
+- Queue events move to Phase 4.
+- There's no `middlewares()` hook, since `.layer()` on the router does the same job.
+- CORS is any tower layer.
+- There's no request timeout, because the Workers platform enforces its own limits and tokio timers don't run on wasm.
+- `typed Bindings` moves to Phase 2.
+
 ### Phase 2: storage
 
 | Product | What doko adds on top of `worker` |
