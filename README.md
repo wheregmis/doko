@@ -4,6 +4,12 @@
 
 <h1 align="center">doko</h1>
 
+<p align="center">
+  <a href="https://crates.io/crates/doko-rs"><img src="https://img.shields.io/crates/v/doko-rs.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/doko-rs"><img src="https://docs.rs/doko-rs/badge.svg" alt="docs.rs"></a>
+  <a href="#license"><img src="https://img.shields.io/crates/l/doko-rs.svg" alt="License: MIT OR Apache-2.0"></a>
+</p>
+
 <p align="center"><b>Put everything in the basket. Carry it with one strap.</b><br>
 A batteries-included Rust framework for Cloudflare Workers.</p>
 
@@ -733,12 +739,17 @@ assert_eq!(mail.subject, "Reset your password");
 
 `mail_to` and `wait_for_job` each return a mail or a job once, so a second call waits for the next one. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. Postgres needs a database at the `local_connection_string`, and an app with `[ai]` needs `wrangler login` to start. See [examples/hello/tests/app.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/tests/app.rs).
 
-## Contributing and releases
+## Contributing
 
-CI runs `cargo fmt --all --check`, `cargo clippy` with warnings as errors (natively, and for `wasm32-unknown-unknown`) and `cargo test` on every pull request. The integration tests that start `wrangler dev` run locally with `doko test`.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build and test doko, the checks a pull request must pass, and how releases are cut.
 
-Releases are cut by [release-please](https://github.com/googleapis/release-please) from [conventional commits](https://www.conventionalcommits.org) on `master`:
+## License
 
-- `fix: ..` makes a patch release, `feat: ..` a minor one, and `feat!: ..` (a breaking change) a minor one too while the version is below 1.0. `docs:`, `chore:`, `ci:`, `test:` and `refactor:` commits don't make a release.
-- It keeps a release pull request open with the next version and the changelog. Merging that pull request tags the commit, creates the GitHub release, and publishes `doko-rs` and `doko-cli` to crates.io.
-- Both crates share one version, set in the root `Cargo.toml`.
+doko is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in doko by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
