@@ -23,7 +23,10 @@ base64.workspace = true
 mail-parser.workspace = true
 futures-util.workspace = true
 ureq = { version = "3", default-features = false, optional = true }
+tokio-postgres = { workspace = true, optional = true }
 
 [features]
 # doko::test: integration tests against `wrangler dev`. Enable in [dev-dependencies] only.
 test = ["dep:ureq"]
+# doko::Pg: Postgres through a `[hyperdrive.NAME]` binding. Off by default: the driver adds to the wasm size.
+pg = ["dep:tokio-postgres"]

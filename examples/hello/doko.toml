@@ -44,6 +44,16 @@ jwt_issuer = "doko-hello"         # added to the tokens auth::sign issues, requi
 # jwt_audience = "hello-api"
 # jwks_url = "https://issuer.example/.well-known/jwks.json"   # RS256 keys by `kid`, instead of JWT_PUBLIC_KEY
 
+# Postgres through Hyperdrive: ctx.pg(PG), with doko's `pg` feature. `doko dev` and `doko migrate --pg`
+# use this local database; each deployed env needs the `id` from `wrangler hyperdrive create`.
+# Start one with: docker run -d -p 127.0.0.1:5433:5432 -e POSTGRES_USER=doko -e POSTGRES_PASSWORD=doko \
+#   -e POSTGRES_DB=doko_hello postgres:17-alpine
+[hyperdrive.PG]
+local_connection_string = "postgres://doko:doko@127.0.0.1:5433/doko_hello"
+
+# Workers AI: ctx.ai(). Runs on Cloudflare even under `doko dev`, so it needs `wrangler login`.
+[ai]
+
 # A Durable Object class, exported in src/lib.rs with doko::app!(App, objects: [RateLimiter, Room]).
 [do.RATE_LIMITER]
 class_name = "RateLimiter"

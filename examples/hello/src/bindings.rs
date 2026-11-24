@@ -9,3 +9,4 @@ pub const JOBS: doko::QueueBinding = doko::QueueBinding::new("JOBS");
 pub const RATE_LIMITER: doko::DoBinding = doko::DoBinding::new("RATE_LIMITER");
 pub const ROOMS: doko::DoBinding = doko::DoBinding::new("ROOMS");
 pub const EMAIL: doko::EmailBinding = doko::EmailBinding::new("EMAIL");
+pub const PG: doko::HyperdriveBinding = doko::HyperdriveBinding::new("PG");

@@ -85,6 +85,62 @@ fn cache_varies_and_files_stream() {
     }
 }
 
+/// Needs the local Postgres from doko.toml's `[hyperdrive.PG]`, and `psql` for the migrations.
+#[test]
+#[ignore = "starts wrangler dev"]
+fn postgres() {
+    if TcpStream::connect("127.0.0.1:5433").is_err() {
+        eprintln!("skipped: no Postgres at 127.0.0.1:5433 (see [hyperdrive.PG] in doko.toml)");
+        return;
+    }
+    // `doko migrate --pg` applies migrations/pg/*.sql; a second run finds nothing to do.
+    for _ in 0..2 {
+        let migrated = std::process::Command::new("cargo")
+            .args(["run", "-q", "-p", "doko-cli", "--", "migrate", "--pg"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status()
+            .expect("running doko migrate --pg");
+        assert!(migrated.success(), "doko migrate --pg failed");
+    }
+
+    let app = doko::test::App::start(&[]);
+    assert_eq!(app.post_json("/todos", &json!({ "title": " " })).status, 400);
+    // The database outlives the test, so the title is unique to this run.
+    let title = format!("write tests {}", std::process::id());
+    let created = app.post_json("/todos", &json!({ "title": title, "tags": ["a", "b"] }));
+    assert_eq!(created.status, 201, "{}", created.body);
+    let todo: Value = created.json();
+    assert_eq!((&todo["title"], &todo["done"], &todo["tags"]), (&json!(title), &json!(false), &json!(["a", "b"])));
+    assert!(todo["created_at"].as_str().is_some_and(|t| t.starts_with("20") && t.ends_with('Z')), "{todo}");
+
+    let id = todo["id"].as_i64().unwrap();
+    assert_eq!(app.send("POST", &format!("/todos/{id}/done"), &[], "").status, 204);
+    assert_eq!(app.send("POST", "/todos/999999999/done", &[], "").status, 404);
+    let todos: Vec<Value> = app.get("/todos").json();
+    assert!(todos.iter().any(|t| t["id"] == id && t["done"] == true), "{todos:?}");
+}
+
+/// Calls Workers AI for real, which is billed to the logged-in account: run with `DOKO_TEST_AI=1`.
+#[test]
+#[ignore = "starts wrangler dev"]
+fn ai() {
+    if std::env::var("DOKO_TEST_AI").is_err() {
+        eprintln!("skipped: set DOKO_TEST_AI=1 to call Workers AI");
+        return;
+    }
+    let app = doko::test::App::start(&[]);
+    assert_eq!(app.post_json("/summarize", &json!({ "text": " " })).status, 400);
+    let text = "Durable Objects give each named object its own storage and a single thread, \
+                which makes them a good fit for counters, chat rooms and rate limiters.";
+    let summarized = app.post_json("/summarize", &json!({ "text": text }));
+    assert_eq!(summarized.status, 200, "{}", summarized.body);
+    assert!(summarized.json::<Value>()["summary"].as_str().is_some_and(|s| !s.is_empty()), "{}", summarized.body);
+
+    let streamed = app.post_json("/summarize/stream", &json!({ "text": text }));
+    assert_eq!((streamed.status, streamed.header("content-type")), (200, Some("text/event-stream")), "{}", streamed.body);
+    assert!(streamed.body.contains("data: ") && streamed.body.contains("[DONE]"), "{}", streamed.body);
+}
+
 /// A minimal WebSocket client: the handshake, then one text frame each way.
 fn websocket_roundtrip(app: &doko::test::App, path: &str, text: &str) -> String {
     let addr = app.url().trim_start_matches("http://");

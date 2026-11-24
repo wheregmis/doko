@@ -68,6 +68,14 @@ class_name = "Room"
 [[send_email]]
 name = "EMAIL"
 
+[[hyperdrive]]
+binding = "PG"
+id = "set-id-in-doko-toml-before-deploying"
+localConnectionString = "postgres://doko:doko@127.0.0.1:5433/doko_hello"
+
+[ai]
+binding = "AI"
+
 [env.prod.triggers]
 crons = ["0 3 * * *"]
 
@@ -121,3 +129,11 @@ class_name = "Room"
 
 [[env.prod.send_email]]
 name = "EMAIL"
+
+[[env.prod.hyperdrive]]
+binding = "PG"
+id = "set-id-in-doko-toml-before-deploying"
+localConnectionString = "postgres://doko:doko@127.0.0.1:5433/doko_hello"
+
+[env.prod.ai]
+binding = "AI"

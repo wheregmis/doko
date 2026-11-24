@@ -8,11 +8,12 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-doko.workspace = true
+# `pg` adds doko::Pg (Postgres through Hyperdrive); leave it off if you only use D1.
+doko = { workspace = true, features = ["pg"] }
 # required: worker's #[event] macro expands to ::worker paths
 worker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-doko = { workspace = true, features = ["test"] }
+doko = { workspace = true, features = ["pg", "test"] }

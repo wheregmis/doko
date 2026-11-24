@@ -14,6 +14,7 @@
 //!
 //! The app crate must also depend on `worker` directly: worker's `#[event]` macro expands to `::worker::` paths.
 
+mod ai;
 pub mod auth;
 mod cache;
 mod durable;
@@ -21,10 +22,13 @@ mod error;
 mod jobs;
 mod log;
 mod mail;
+#[cfg(feature = "pg")]
+mod pg;
 mod storage;
 #[cfg(feature = "test")]
 pub mod test;
 
+pub use ai::Ai;
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
 #[doc(hidden)]
@@ -33,7 +37,11 @@ pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_w
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
 pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html, render_html, render_text};
-pub use storage::{Bucket, D1Binding, Db, DoBinding, EmailBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
+#[cfg(feature = "pg")]
+pub use pg::{Pg, PgStatement};
+pub use storage::{
+    Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement,
+};
 pub use worker;
 
 use std::{convert::Infallible, pin::pin, sync::Arc, time::Duration};

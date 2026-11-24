@@ -21,6 +21,7 @@ toml = "0.9"
 serde_json = "1"
 base64 = "0.22"
 mail-parser = "1"
+tokio-postgres = { version = "0.7", default-features = false, features = ["js"] }
 # Already in the tree through axum and worker.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
