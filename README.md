@@ -136,10 +136,14 @@ ctx.bucket(FILES)?.serve("logo.png").await   // streams with content-type + etag
 | | Methods |
 |---|---|
 | `Kv` | `get::<T>`, `put`, `put_ttl`, `delete` (values are JSON) |
-| `Bucket` | `serve`, `get_bytes`, `put(key, bytes, content_type)`, `delete` |
+| `Bucket` | `serve`, `get_bytes`, `put(key, bytes, content_type)`, `put_stream(key, body, content_type)`, `delete` |
 | `Db` | `all::<T>`, `first::<T>`, `run` (returns `changes`, `last_row_id`), `statement` + `batch` (one transaction) |
 
 D1 params are a tuple bound to `?1`, `?2` and so on: `(id,)`, `(name, age)` or `()`. Each wrapper has `.raw()` for the full `worker` API.
+
+**Uploads.** `put_stream` takes the handler's `body: Body` and stores it as it arrives, holding at most 8 MiB in memory. Bodies larger than that go to R2 as a multipart upload, a part at a time; if the body fails midway, nothing is stored.
+
+**Environments.** Each wrangler env has its own namespaces, buckets and databases, so keys need no per-env prefix: give each env its own `id` / `bucket_name` / `database_id`.
 
 ### Migrations
 
@@ -171,6 +175,7 @@ let n = ctx.cache().get_or_set("notes:count", 30, async { count(&db).await }).aw
 - `.cache()` applies to the routes added before it.
 - It caches only 200 GET responses with a known size of 10 MB or less and no `Set-Cookie` or `private`/`no-store` header.
 - Requests with `Authorization` are never cached.
+- `.vary(&["accept-language"])` on the policy keeps one copy per value of those request headers and names them in the response's `Vary`. Pick headers with few distinct values.
 - Responses carry `x-doko-cache: HIT | STALE | MISS | BYPASS`.
 
 **How tag purges work.** Each tag stores a version number in the KV namespace you pass, and that version is part of the cache key. A purge bumps the version, so every data center misses on its next lookup. This is global, but takes up to about 60s, which is how long KV writes take to propagate.
@@ -181,6 +186,7 @@ let n = ctx.cache().get_or_set("notes:count", 30, async { count(&db).await }).aw
 
 ```toml
 [queues.JOBS]                       # this worker sends to and consumes this queue
+                                    # (consume = false: another worker consumes it)
 queue = "my-app-jobs"
 max_retries = 3                     # wrangler consumer settings: max_batch_size,
 dead_letter_queue = "my-app-dlq"    # max_batch_timeout, retry_delay, max_concurrency
@@ -211,6 +217,7 @@ ctx.enqueue(JOBS, &CountWords { id }).await?;          // or enqueue_in(JOBS, &j
 ```
 
 - **Failed jobs.** A job that returns `Err` is retried, and after `max_retries` it moves to the `dead_letter_queue`. Make `perform` safe to run more than once.
+- **Batches.** The jobs of one batch run concurrently, and each is acked or retried on its own, so jobs must not depend on each other's order. `max_batch_size` caps how many run at once.
 - **Job logs.** Every attempt is logged as JSON, with the job name and attempt number.
 - **Cron triggers.** doko writes each env's cron triggers from its `[tasks]` schedules. On every trigger, it runs each task whose schedule matches.
 - **Testing a task locally:** `curl "localhost:8787/cdn-cgi/handler/scheduled?cron=0+3+*+*+*"`.
@@ -247,7 +254,38 @@ let res = ctx.durable(COUNTER)?.get("page:/home")?.fetch(Request::get("https://d
 
 - **Migrations.** Wrangler needs a migration for every new class. doko appends one to `wrangler.toml` when a `[do.*]` class first appears, and keeps the earlier ones, so **commit `wrangler.toml`**: it is the migration history.
 - **Removing a class** deletes everything its objects stored, so doko won't write that migration. It stops and prints the `deleted_classes` entry to append to `wrangler.toml` yourself.
-- New classes use SQLite-backed storage. WebSocket handlers are not wrapped yet.
+- New classes use SQLite-backed storage.
+
+### WebSockets
+
+An object can hold WebSockets, which is how chat rooms, presence and live updates are built. The sockets hibernate: an idle object is evicted from memory while its clients stay connected.
+
+```rust
+use worker::{WebSocket, WebSocketIncomingMessage};
+
+impl DurableObject for Room {
+    fn new(state: State, _env: Env) -> Self { Self(state) }
+
+    async fn fetch(&self, req: Request) -> Result<Response<Body>> {
+        doko::accept_websocket(&self.0, &req)             // 101 with the client's socket, or 426
+    }
+
+    async fn websocket_message(&self, _ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+        if let WebSocketIncomingMessage::String(text) = message {
+            for peer in self.0.get_websockets() { peer.send_with_str(&text)?; }
+        }
+        Ok(())
+    }
+    // Optional: websocket_close, websocket_error
+}
+
+// The route passes the upgrade request to the room's object unchanged.
+async fn join(ctx: Ctx, Path(room): Path<String>, req: Request) -> Result<Response<Body>> {
+    ctx.durable(ROOMS)?.get(&room)?.fetch(req).await
+}
+```
+
+The object may have slept since the last message, so keep per-socket state in storage or in `ws.serialize_attachment(..)`, not in fields. See [examples/hello/src/controllers/rooms.rs](examples/hello/src/controllers/rooms.rs).
 
 ### Rate limits
 
@@ -273,6 +311,7 @@ doko::app!(App, objects: [RateLimiter]);
 - Over the limit, requests get a 429 `{"error": "too many requests"}` with `retry-after`.
 - The window is fixed and starts at a client's first request. Each client's counter lives in its own object and is deleted when the window ends.
 - The client is the `cf-connecting-ip` header. Local dev has none, so all local requests share one counter.
+- `.key_by(|req| ..)` counts per API key, tenant or user instead: `RateLimit::new(..).key_by(|req| req.headers().get("x-api-key")?.to_str().ok().map(str::to_owned))`. Requests it returns `None` for are counted by IP. Key only on values a client can't change at will.
 - If the limiter can't be reached, requests get a 500 instead of passing unlimited.
 
 ## Auth
@@ -283,9 +322,18 @@ doko::app!(App, objects: [RateLimiter]);
 |---|---|
 | Sessions | secret `SESSION_SECRET`, and `[kv.SESSIONS]` in doko.toml |
 | JWTs (HS256, issued by you) | secret `JWT_SECRET` |
-| JWTs (RS256, issued elsewhere) | secret `JWT_PUBLIC_KEY`: the issuer's public key as PEM |
+| JWTs (RS256, issued elsewhere) | secret `JWT_PUBLIC_KEY` (the issuer's public key as PEM), or `jwks_url` below |
 
-Set secrets with `wrangler secret put`, or in `.dev.vars` locally.
+Set secrets with `wrangler secret put`, or in `.dev.vars` locally. The optional `[auth]` table tunes the rest, and `[env.<name>.auth]` overrides it per key:
+
+```toml
+[auth]
+session_ttl_secs = 86400            # default: 7 days
+session_cookie = "sid"              # default: doko_session
+jwt_issuer = "https://id.example"   # required `iss`; auth::sign adds it
+jwt_audience = "my-api"             # required `aud`; auth::sign adds it
+jwks_url = "https://id.example/.well-known/jwks.json"   # RS256 keys, picked by the token's `kid`
+```
 
 ```rust
 use doko::{RouterExt, auth::{self, Claims, Session, SetCookie}};
@@ -317,7 +365,9 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 
 - **Sessions.** The cookie (`HttpOnly; Secure; SameSite=Lax`) holds a random id signed with `SESSION_SECRET`; the data lives in KV for 7 days. `session.set` and `session.clear` return a `SetCookie` that must go out with the response. `set` always issues a new id.
 - **Strongly consistent sessions.** KV can serve a session for up to a minute after logout in other regions. If that matters, declare `[do.SESSIONS] class_name = "SessionStore"` instead of `[kv.SESSIONS]` and export it: `doko::app!(App, objects: [SessionStore])`.
-- **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp` and `nbf`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
+- **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp`, `nbf` and the configured `iss` / `aud`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
+- **JWKS.** With `jwks_url`, RS256 tokens are checked against the key their `kid` names. The key set is kept in memory for an hour; an unknown `kid` refetches it, at most once a minute, so rotated keys are picked up without a deploy. Set `jwt_issuer` too, or any tenant of a shared identity provider can mint tokens you accept.
+- **Roles** are yours to define: put them in the claims or the session value and check them in the handler (`Error::forbidden()`).
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
 - **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](examples/hello/src/controllers/auth.rs).
 
@@ -337,8 +387,8 @@ ctx.mail(EMAIL)?.send(&Message {
     to: vec![user.email],
     subject: "Welcome".into(),
     text: Some("Thanks for signing up.".into()),
-    html: Some("<p>Thanks for signing up.</p>".into()),
-    reply_to: None,
+    html: Some(format!("<p>Thanks for signing up, {}.</p>", doko::escape_html(&user.name))),
+    ..Default::default()
 }).await?;
 
 // Receiving.
@@ -354,14 +404,15 @@ impl Hooks for App {
 
 - **Sending** needs a domain onboarded to Cloudflare Email Sending (`wrangler email sending enable example.com`), and `from` must be on it. It is for transactional mail, not newsletters.
 - **Receiving** needs an Email Routing rule that delivers an address to this worker. Without an `on_email`, mail is rejected. An `Err` fails the delivery, so the sending server retries or bounces. doko logs the sender and recipient of every inbound mail.
-- **Escape user input** before putting it in `html`. `send` refuses line breaks in addresses and the subject.
+- **More fields.** `cc`, `bcc`, `reply_to`, `headers: vec![("X-Entity-Ref-ID".into(), id)]` and `attachments: vec![Attachment { filename, content_type, content }]`. `from` and `reply_to` may carry a display name: `"Ada Lovelace <ada@example.com>"`. Inbound attachments are in `email.read().await?.attachments`.
+- **Escape user input** with `doko::escape_html` before putting it in `html`. `send` refuses line breaks in addresses, the subject, headers and file names.
 - **Locally,** `doko dev` logs sent mail instead of sending it (set `remote = true` on the binding to send for real). To deliver a test mail, POST a raw message, with a `Message-ID` header, to wrangler's local endpoint:
 
 ```bash
 curl 'localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=notes@example.com' --data-binary @mail.eml
 ```
 
-`Mailer::raw()` and `InboundEmail::raw()` give the `worker` types, for attachments, cc/bcc, custom headers and replies.
+`Mailer::raw()` and `InboundEmail::raw()` give the `worker` types, for inline images, raw MIME messages and replies.
 
 ## Integration tests
 

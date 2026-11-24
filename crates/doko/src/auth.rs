@@ -6,11 +6,23 @@
 //! |---|---|
 //! | [`Session`] | secret `SESSION_SECRET`, and `[kv.SESSIONS]` or `[do.SESSIONS] class_name = "SessionStore"` |
 //! | [`Claims`] and [`sign`] (HS256) | secret `JWT_SECRET` |
-//! | [`Claims`] for RS256 tokens | secret `JWT_PUBLIC_KEY`, the issuer's public key as PEM |
+//!
+//! | [`Claims`] for RS256 tokens | secret `JWT_PUBLIC_KEY` (the issuer's public key as PEM), or `jwks_url` below |
 //!
 //! [`RouterExt::require_auth`](crate::RouterExt::require_auth) turns away requests with neither.
+//!
+//! The optional `[auth]` table in doko.toml (and `[env.<name>.auth]`) tunes it:
+//!
+//! ```toml
+//! [auth]
+//! session_ttl_secs = 86400            # default: 7 days
+//! session_cookie = "sid"              # default: doko_session
+//! jwt_issuer = "https://id.example"   # tokens must carry this `iss`; `sign` adds it
+//! jwt_audience = "my-api"             # tokens must carry this `aud`; `sign` adds it
+//! jwks_url = "https://id.example/.well-known/jwks.json"   # RS256 keys, picked by `kid`
+//! ```
 
-use std::time::Duration;
+use std::{cell::RefCell, time::Duration};
 
 use axum::{
     body::{Body, to_bytes},
@@ -32,7 +44,7 @@ use serde_json::Value;
 use worker::{
     Date, Env,
     durable::State,
-    js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array},
+    js_sys::{Array, Function, JSON, Object, Promise, Reflect, Uint8Array},
     send::SendFuture,
     wasm_bindgen::{JsCast, JsValue},
     wasm_bindgen_futures::JsFuture,
@@ -45,8 +57,37 @@ const JWT_SECRET: &str = "JWT_SECRET";
 const JWT_PUBLIC_KEY: &str = "JWT_PUBLIC_KEY";
 /// The `[kv.SESSIONS]` or `[do.SESSIONS]` binding holding session data.
 const SESSIONS: &str = "SESSIONS";
-const SESSION_COOKIE: &str = "doko_session";
-const SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Var holding `[auth]` from doko.toml, merged for the active environment.
+const AUTH_VAR: &str = "DOKO_AUTH";
+/// How long a JWKS is trusted before it is fetched again.
+const JWKS_MAX_AGE_MS: u64 = 60 * 60 * 1000;
+/// The soonest an unknown `kid` may trigger another fetch, so bad tokens can't hammer the issuer.
+const JWKS_MIN_REFETCH_MS: u64 = 60 * 1000;
+
+/// `[auth]` from doko.toml. `doko config` has already validated it.
+#[derive(Deserialize, Default)]
+struct Config {
+    session_ttl_secs: Option<u64>,
+    session_cookie: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
+    jwks_url: Option<String>,
+}
+
+impl Config {
+    fn load(ctx: &Ctx) -> Self {
+        // A wrangler.toml generated before `[auth]` existed has no such var: defaults apply.
+        ctx.env().object_var(AUTH_VAR).unwrap_or_default()
+    }
+
+    fn session_ttl(&self) -> u64 {
+        self.session_ttl_secs.unwrap_or(7 * 24 * 60 * 60)
+    }
+
+    fn session_cookie(&self) -> &str {
+        self.session_cookie.as_deref().unwrap_or("doko_session")
+    }
+}
 /// The most PBKDF2 iterations the Workers runtime accepts.
 const PBKDF2_ITERATIONS: u32 = 100_000;
 const PBKDF2: &str = "pbkdf2-sha256";
@@ -104,11 +145,12 @@ async fn hmac_verify(secret: &[u8], data: &[u8], signature: &[u8]) -> Js<bool> {
     Ok(subtle("verify", &["HMAC".into(), key, bytes(signature), bytes(data)]).await?.is_truthy())
 }
 
-async fn rsa_verify(public_key_der: &[u8], data: &[u8], signature: &[u8]) -> Js<bool> {
+/// `format` is WebCrypto's: `"spki"` with DER bytes, or `"jwk"` with a JWK object.
+async fn rsa_verify(format: &str, public_key: JsValue, data: &[u8], signature: &[u8]) -> Js<bool> {
     const NAME: &str = "RSASSA-PKCS1-v1_5";
     let alg = obj(&[("name", NAME.into()), ("hash", "SHA-256".into())]);
     let usages = Array::of1(&"verify".into()).into();
-    let key = subtle("importKey", &["spki".into(), bytes(public_key_der), alg, false.into(), usages]).await?;
+    let key = subtle("importKey", &[format.into(), public_key, alg, false.into(), usages]).await?;
     Ok(subtle("verify", &[NAME.into(), key, bytes(signature), bytes(data)]).await?.is_truthy())
 }
 
@@ -162,7 +204,8 @@ fn parse_password_hash(hash: &str) -> Option<(u32, Vec<u8>, Vec<u8>)> {
 // --- JWT ---
 
 /// Issues an HS256 JWT signed with the `JWT_SECRET` secret, expiring in `ttl_secs`.
-/// `claims` must serialize to a JSON object; `iat` and `exp` are added to it.
+/// `claims` must serialize to a JSON object; `iat` and `exp` are added to it, and so are `iss` and
+/// `aud` when `[auth]` sets `jwt_issuer` / `jwt_audience` and the claims don't.
 pub async fn sign<T: Serialize>(ctx: &Ctx, claims: &T, ttl_secs: u64) -> Result<String> {
     let Value::Object(mut claims) = serde_json::to_value(claims)? else {
         return Err(Error::internal("JWT claims must serialize to a JSON object"));
@@ -170,6 +213,12 @@ pub async fn sign<T: Serialize>(ctx: &Ctx, claims: &T, ttl_secs: u64) -> Result<
     let now = Date::now().as_millis() / 1000;
     claims.insert("iat".into(), now.into());
     claims.insert("exp".into(), now.saturating_add(ttl_secs).into());
+    let config = Config::load(ctx);
+    for (name, value) in [("iss", config.jwt_issuer), ("aud", config.jwt_audience)] {
+        if let Some(value) = value {
+            claims.entry(name).or_insert(value.into());
+        }
+    }
     let input = format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#),
@@ -189,8 +238,10 @@ pub async fn sign<T: Serialize>(ctx: &Ctx, claims: &T, ttl_secs: u64) -> Result<
 /// async fn me(Claims(user): Claims<User>) -> String { user.sub }
 /// ```
 ///
-/// HS256 tokens are checked against the `JWT_SECRET` secret, RS256 tokens against `JWT_PUBLIC_KEY`.
-/// Expired tokens (`exp`) and tokens not yet valid (`nbf`) are rejected.
+/// HS256 tokens are checked against the `JWT_SECRET` secret. RS256 tokens are checked against the
+/// key their `kid` names at `[auth] jwks_url`, or against `JWT_PUBLIC_KEY` when no URL is set.
+/// Expired tokens (`exp`), tokens not yet valid (`nbf`), and tokens whose `iss` / `aud` don't
+/// match `[auth] jwt_issuer` / `jwt_audience` are rejected.
 pub struct Claims<T>(pub T);
 
 impl<T: DeserializeOwned> FromRequestParts<Ctx> for Claims<T> {
@@ -207,13 +258,13 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-/// A token split into (signed part, algorithm, claims, signature), if it is well formed.
-fn parse_jwt(token: &str) -> Option<(&str, String, Value, Vec<u8>)> {
+/// A token split into (signed part, header, claims, signature), if it is well formed.
+fn parse_jwt(token: &str) -> Option<(&str, Value, Value, Vec<u8>)> {
     let (input, signature) = token.rsplit_once('.')?;
     let (header, claims) = input.split_once('.')?;
     let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(header).ok()?).ok()?;
     let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims).ok()?).ok()?;
-    Some((input, header["alg"].as_str()?.to_owned(), claims, URL_SAFE_NO_PAD.decode(signature).ok()?))
+    Some((input, header, claims, URL_SAFE_NO_PAD.decode(signature).ok()?))
 }
 
 /// Whether the claims' `exp` and `nbf` allow the token at `now_secs`. A token without `exp` never expires.
@@ -224,27 +275,82 @@ fn in_validity_window(claims: &Value, now_secs: u64) -> bool {
         && !matches!(time("nbf"), Some(nbf) if nbf.is_none_or(|nbf| (now_secs as f64) < nbf))
 }
 
+/// Whether the claims carry the configured issuer and audience. `aud` may be one string or a list.
+fn issued_for(claims: &Value, config: &Config) -> bool {
+    let iss = config.jwt_issuer.as_deref().is_none_or(|iss| claims["iss"] == iss);
+    let aud = config.jwt_audience.as_deref().is_none_or(|aud| match &claims["aud"] {
+        Value::Array(list) => list.iter().any(|a| a == aud),
+        one => one == aud,
+    });
+    iss && aud
+}
+
+/// The RSA key called `kid` in a JWKS, as JSON. A token without a `kid` gets the first RSA key.
+fn find_jwk(keys: &[Value], kid: Option<&str>) -> Option<String> {
+    keys.iter().find(|k| k["kty"] == "RSA" && kid.is_none_or(|kid| k["kid"] == kid)).map(Value::to_string)
+}
+
+#[derive(Deserialize)]
+struct Jwks {
+    keys: Vec<Value>,
+}
+
+/// The issuer's key for `kid`, from the JWKS at `url`. The key set is kept in the isolate for an
+/// hour; a `kid` it doesn't have refetches it (at most once a minute), which picks up rotated keys.
+async fn jwk(url: &str, kid: Option<&str>) -> Result<Option<String>> {
+    thread_local! {
+        static JWKS: RefCell<Option<(u64, Vec<Value>)>> = const { RefCell::new(None) };
+    }
+    let now = Date::now().as_millis();
+    let cached = JWKS.with_borrow(|c| c.as_ref().map(|(at, keys)| (now.saturating_sub(*at), find_jwk(keys, kid))));
+    if let Some((age, found)) = cached
+        && age < JWKS_MAX_AGE_MS
+        && (found.is_some() || age < JWKS_MIN_REFETCH_MS)
+    {
+        return Ok(found);
+    }
+    let url = url.parse().map_err(|e| Error::internal(format!("[auth] jwks_url: {e}")))?;
+    let fetched: worker::Result<Jwks> =
+        SendFuture::new(async { worker::Fetch::Url(url).send().await?.json().await }).await;
+    let keys = fetched.map_err(|e| Error::internal(format!("fetching [auth] jwks_url: {e}")))?.keys;
+    let found = find_jwk(&keys, kid);
+    JWKS.set(Some((now, keys)));
+    Ok(found)
+}
+
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     let body: String = pem.split("-----").nth(2)?.split_whitespace().collect();
     STANDARD.decode(body).ok()
 }
 
 async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
-    let (input, alg, claims, signature) = parse_jwt(token).ok_or_else(Error::unauthorized)?;
+    let (input, header, claims, signature) = parse_jwt(token).ok_or_else(Error::unauthorized)?;
+    let config = Config::load(ctx);
     // Each algorithm has its own key, so a token can't pick HS256 to be checked against the public key.
-    let valid = match alg.as_str() {
-        "HS256" => {
+    let valid = match (header["alg"].as_str(), &config.jwks_url) {
+        (Some("HS256"), _) => {
             let secret = ctx.secret(JWT_SECRET)?;
             SendFuture::new(hmac_verify(secret.as_bytes(), input.as_bytes(), &signature)).await.map_err(js_err)?
         }
-        "RS256" => {
+        (Some("RS256"), Some(url)) => match jwk(url, header["kid"].as_str()).await? {
+            Some(key) => SendFuture::new(async {
+                rsa_verify("jwk", JSON::parse(&key)?, input.as_bytes(), &signature).await
+            })
+            .await
+            .map_err(js_err)?,
+            None => false,
+        },
+        (Some("RS256"), None) => {
             let der = pem_to_der(&ctx.secret(JWT_PUBLIC_KEY)?)
                 .ok_or_else(|| Error::internal(format!("`{JWT_PUBLIC_KEY}` is not a PEM public key")))?;
-            SendFuture::new(rsa_verify(&der, input.as_bytes(), &signature)).await.map_err(js_err)?
+            SendFuture::new(async { rsa_verify("spki", bytes(&der), input.as_bytes(), &signature).await })
+                .await
+                .map_err(js_err)?
         }
         _ => false,
     };
-    if valid && in_validity_window(&claims, Date::now().as_millis() / 1000) { Ok(claims) } else { Err(Error::unauthorized()) }
+    let now = Date::now().as_millis() / 1000;
+    if valid && in_validity_window(&claims, now) && issued_for(&claims, &config) { Ok(claims) } else { Err(Error::unauthorized()) }
 }
 
 // --- Sessions ---
@@ -265,7 +371,7 @@ async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
 /// The cookie holds only a random id, signed with the `SESSION_SECRET` secret. The data lives in
 /// `[kv.SESSIONS]`, or in `[do.SESSIONS] class_name = "SessionStore"` when you declare that instead:
 /// KV can serve a session for up to a minute after logout in other regions, the object never does.
-/// Sessions last 7 days.
+/// Sessions last 7 days, or `[auth] session_ttl_secs`; the cookie is `doko_session`, or `[auth] session_cookie`.
 #[derive(Clone)]
 pub struct Session {
     ctx: Ctx,
@@ -293,19 +399,19 @@ impl IntoResponse for SetCookie {
     }
 }
 
-fn set_cookie(value: &str, max_age: u64) -> Result<SetCookie> {
+fn set_cookie(name: &str, value: &str, max_age: u64) -> Result<SetCookie> {
     // Lax keeps the cookie off cross-site POSTs, which is the CSRF defence for cookie sessions.
-    let cookie = format!("{SESSION_COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Lax");
+    let cookie = format!("{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Lax");
     Ok(SetCookie(HeaderValue::from_str(&cookie)?))
 }
 
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+fn session_cookie<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
     headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+        .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
 }
 
 enum Store {
@@ -324,8 +430,8 @@ impl Store {
         })
     }
 
-    async fn object(objects: &Durable, id: &str, method: Method, body: Body) -> Result<Response<Body>> {
-        let uri = format!("https://doko.do/?ttl_secs={SESSION_TTL_SECS}");
+    async fn object(objects: &Durable, id: &str, method: Method, ttl_secs: u64, body: Body) -> Result<Response<Body>> {
+        let uri = format!("https://doko.do/?ttl_secs={ttl_secs}");
         objects.get(id)?.fetch(Request::builder().method(method).uri(uri).body(body)?).await
     }
 
@@ -333,7 +439,7 @@ impl Store {
         match self {
             Self::Kv(kv) => kv.get(&kv_key(id)).await,
             Self::Durable(objects) => {
-                let res = Self::object(objects, id, Method::GET, Body::empty()).await?;
+                let res = Self::object(objects, id, Method::GET, 0, Body::empty()).await?;
                 match res.status() {
                     StatusCode::OK => Ok(Some(serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await?)?)),
                     StatusCode::NOT_FOUND => Ok(None),
@@ -343,11 +449,11 @@ impl Store {
         }
     }
 
-    async fn put(&self, id: &str, data: &Value) -> Result<()> {
+    async fn put(&self, id: &str, data: &Value, ttl_secs: u64) -> Result<()> {
         match self {
-            Self::Kv(kv) => kv.put_ttl(&kv_key(id), data, SESSION_TTL_SECS).await,
+            Self::Kv(kv) => kv.put_ttl(&kv_key(id), data, ttl_secs).await,
             Self::Durable(objects) => {
-                Self::ok(Self::object(objects, id, Method::PUT, Body::from(serde_json::to_vec(data)?)).await?)
+                Self::ok(Self::object(objects, id, Method::PUT, ttl_secs, Body::from(serde_json::to_vec(data)?)).await?)
             }
         }
     }
@@ -355,7 +461,7 @@ impl Store {
     async fn delete(&self, id: &str) -> Result<()> {
         match self {
             Self::Kv(kv) => kv.delete(&kv_key(id)).await,
-            Self::Durable(objects) => Self::ok(Self::object(objects, id, Method::DELETE, Body::empty()).await?),
+            Self::Durable(objects) => Self::ok(Self::object(objects, id, Method::DELETE, 0, Body::empty()).await?),
         }
     }
 
@@ -369,8 +475,9 @@ fn kv_key(id: &str) -> String {
 }
 
 impl Session {
-    /// The session named by a correctly signed cookie, or an empty one.
-    async fn load(ctx: &Ctx, cookie: Option<String>) -> Result<Self> {
+    /// The session named by a correctly signed cookie in `headers`, or an empty one.
+    async fn load(ctx: &Ctx, headers: &HeaderMap) -> Result<Self> {
+        let cookie = session_cookie(headers, Config::load(ctx).session_cookie()).map(str::to_owned);
         let mut session = Self { ctx: ctx.clone(), id: None, data: None };
         let Some((id, signature)) = cookie.as_deref().and_then(|c| c.split_once('.')) else {
             return Ok(session);
@@ -398,11 +505,12 @@ impl Session {
         let secret = self.ctx.secret(SESSION_SECRET)?;
         let id = URL_SAFE_NO_PAD.encode(random_bytes::<16>().map_err(js_err)?);
         let signature = SendFuture::new(hmac_sign(secret.as_bytes(), id.as_bytes())).await.map_err(js_err)?;
-        store.put(&id, &serde_json::to_value(value)?).await?;
+        let config = Config::load(&self.ctx);
+        store.put(&id, &serde_json::to_value(value)?, config.session_ttl()).await?;
         if let Some(old) = &self.id {
             store.delete(old).await?;
         }
-        set_cookie(&format!("{id}.{}", URL_SAFE_NO_PAD.encode(signature)), SESSION_TTL_SECS)
+        set_cookie(config.session_cookie(), &format!("{id}.{}", URL_SAFE_NO_PAD.encode(signature)), config.session_ttl())
     }
 
     /// Ends the session: deletes its data and expires the cookie.
@@ -410,7 +518,7 @@ impl Session {
         if let Some(id) = &self.id {
             Store::open(&self.ctx)?.delete(id).await?;
         }
-        set_cookie("", 0)
+        set_cookie(Config::load(&self.ctx).session_cookie(), "", 0)
     }
 }
 
@@ -422,22 +530,23 @@ impl FromRequestParts<Ctx> for Session {
         if let Some(session) = parts.extensions.remove::<Session>() {
             return Ok(session);
         }
-        let cookie = session_cookie(&parts.headers).map(str::to_owned);
-        Session::load(ctx, cookie).await
+        // Owned, so the future doesn't borrow `parts` across an await.
+        let headers = parts.headers.clone();
+        Session::load(ctx, &headers).await
     }
 }
 
 /// The middleware behind `RouterExt::require_auth`.
 pub(crate) async fn require(mut req: Request, next: Next) -> Response<Body> {
     let token = bearer(req.headers()).map(str::to_owned);
-    let cookie = session_cookie(req.headers()).map(str::to_owned);
+    let headers = req.headers().clone();
     let ctx = req.extensions().get::<Ctx>().cloned();
     let checked = async {
         let ctx = ctx.ok_or_else(|| Error::internal("require_auth: request has no Ctx"))?;
         if let Some(token) = token {
             return verify_jwt(&ctx, &token).await.map(|_| None);
         }
-        let session = Session::load(&ctx, cookie).await?;
+        let session = Session::load(&ctx, &headers).await?;
         if session.data.is_some() { Ok(Some(session)) } else { Err(Error::unauthorized()) }
     };
     match checked.await {
@@ -498,10 +607,11 @@ mod tests {
     #[test]
     fn finds_the_session_cookie() {
         let mut h = HeaderMap::new();
-        assert_eq!(session_cookie(&h), None);
+        assert_eq!(session_cookie(&h, "doko_session"), None);
         h.append(COOKIE, HeaderValue::from_static("a=1; doko_session_x=no"));
         h.append(COOKIE, HeaderValue::from_static("b=2;  doko_session=id.sig ; c=3"));
-        assert_eq!(session_cookie(&h), Some("id.sig"));
+        assert_eq!(session_cookie(&h, "doko_session"), Some("id.sig"));
+        assert_eq!(session_cookie(&h, "b"), Some("2"), "the cookie name is configurable");
     }
 
     #[test]
@@ -516,9 +626,9 @@ mod tests {
     #[test]
     fn parses_jwts_and_checks_their_times() {
         // {"alg":"HS256","typ":"JWT"} . {"sub":"1"} . "sig"
-        let (input, alg, claims, signature) = parse_jwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.c2ln").unwrap();
+        let (input, header, claims, signature) = parse_jwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.c2ln").unwrap();
         assert_eq!(input, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0");
-        assert_eq!((alg.as_str(), &claims, signature.as_slice()), ("HS256", &json!({ "sub": "1" }), &b"sig"[..]));
+        assert_eq!((header["alg"].as_str(), &claims, signature.as_slice()), (Some("HS256"), &json!({ "sub": "1" }), &b"sig"[..]));
         assert!(parse_jwt("a.b").is_none());
         assert!(parse_jwt("not.a.jwt").is_none());
 
@@ -527,6 +637,31 @@ mod tests {
         assert!(!in_validity_window(&json!({ "exp": 100 }), 100), "exp is exclusive");
         assert!(!in_validity_window(&json!({ "nbf": 101 }), 100));
         assert!(!in_validity_window(&json!({ "exp": "tomorrow" }), 100), "a malformed exp is not ignored");
+    }
+
+    #[test]
+    fn checks_issuer_and_audience() {
+        let config = |iss: Option<&str>, aud: Option<&str>| Config {
+            jwt_issuer: iss.map(Into::into),
+            jwt_audience: aud.map(Into::into),
+            ..Default::default()
+        };
+        assert!(issued_for(&json!({}), &config(None, None)), "nothing configured, nothing checked");
+        let both = config(Some("https://id.example"), Some("api"));
+        assert!(issued_for(&json!({ "iss": "https://id.example", "aud": "api" }), &both));
+        assert!(issued_for(&json!({ "iss": "https://id.example", "aud": ["web", "api"] }), &both));
+        assert!(!issued_for(&json!({ "iss": "https://evil.example", "aud": "api" }), &both));
+        assert!(!issued_for(&json!({ "iss": "https://id.example", "aud": ["web"] }), &both));
+        assert!(!issued_for(&json!({ "aud": "api" }), &both), "a missing claim does not pass");
+    }
+
+    #[test]
+    fn picks_jwks_keys_by_kid() {
+        let keys = [json!({ "kty": "EC", "kid": "a" }), json!({ "kty": "RSA", "kid": "b" }), json!({ "kty": "RSA", "kid": "c" })];
+        assert!(find_jwk(&keys, Some("c")).unwrap().contains(r#""kid":"c""#));
+        assert!(find_jwk(&keys, None).unwrap().contains(r#""kid":"b""#), "no kid: the first RSA key");
+        assert!(find_jwk(&keys, Some("a")).is_none(), "not an RSA key");
+        assert!(find_jwk(&keys, Some("z")).is_none());
     }
 
     #[test]

@@ -28,11 +28,11 @@ pub mod test;
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
 #[doc(hidden)]
-pub use durable::{object_alarm, serve_object};
-pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub};
+pub use durable::{object_alarm, object_result, serve_object};
+pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_websocket};
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
-pub use mail::{EmailBody, InboundEmail, Mailer, Message};
+pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html};
 pub use storage::{Bucket, D1Binding, Db, DoBinding, EmailBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
 pub use worker;
 
@@ -258,7 +258,8 @@ macro_rules! app {
                 use ::worker::wasm_bindgen;
 
                 // The exported class. It shadows the app's type in this block; `self::` still names the app's.
-                #[::worker::durable_object(alarm)]
+                // No argument: exports every handler, so alarms and WebSockets both reach the object.
+                #[::worker::durable_object]
                 pub struct $object(self::$object);
 
                 impl ::worker::DurableObject for $object {
@@ -272,6 +273,30 @@ macro_rules! app {
 
                     async fn alarm(&self) -> ::worker::Result<::worker::Response> {
                         $crate::object_alarm(&self.0).await
+                    }
+
+                    async fn websocket_message(
+                        &self,
+                        ws: ::worker::WebSocket,
+                        message: ::worker::WebSocketIncomingMessage,
+                    ) -> ::worker::Result<()> {
+                        $crate::object_result(<self::$object as $crate::DurableObject>::websocket_message(&self.0, ws, message).await)
+                    }
+
+                    async fn websocket_close(
+                        &self,
+                        ws: ::worker::WebSocket,
+                        code: usize,
+                        reason: ::std::string::String,
+                        was_clean: bool,
+                    ) -> ::worker::Result<()> {
+                        $crate::object_result(
+                            <self::$object as $crate::DurableObject>::websocket_close(&self.0, ws, code, reason, was_clean).await,
+                        )
+                    }
+
+                    async fn websocket_error(&self, ws: ::worker::WebSocket, error: ::worker::Error) -> ::worker::Result<()> {
+                        $crate::object_result(<self::$object as $crate::DurableObject>::websocket_error(&self.0, ws, error).await)
                     }
                 }
             };

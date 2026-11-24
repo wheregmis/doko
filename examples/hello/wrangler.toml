@@ -10,6 +10,10 @@ command = "cargo install -q worker-build@^0.9 && worker-build --release"
 new_sqlite_classes = ["RateLimiter"]
 tag = "v1"
 
+[[migrations]]
+new_sqlite_classes = ["Room"]
+tag = "v2"
+
 [triggers]
 crons = ["*/30 * * * *"]
 
@@ -22,6 +26,11 @@ greeting = "hello from doko"
 
 [vars.DOKO_TASKS]
 prune = "*/30 * * * *"
+
+[vars.DOKO_AUTH]
+jwt_issuer = "doko-hello"
+session_cookie = "hello_session"
+session_ttl_secs = 86400
 
 [[kv_namespaces]]
 binding = "CACHE"
@@ -51,6 +60,10 @@ dead_letter_queue = "doko-hello-jobs-dlq"
 name = "RATE_LIMITER"
 class_name = "RateLimiter"
 
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
 [[send_email]]
 name = "EMAIL"
 
@@ -66,6 +79,11 @@ greeting = "hello from doko (prod)"
 
 [env.prod.vars.DOKO_TASKS]
 prune = "0 3 * * *"
+
+[env.prod.vars.DOKO_AUTH]
+jwt_issuer = "doko-hello"
+session_cookie = "hello_session"
+session_ttl_secs = 86400
 
 [[env.prod.kv_namespaces]]
 binding = "CACHE"
@@ -94,6 +112,10 @@ dead_letter_queue = "doko-hello-jobs-dlq"
 [[env.prod.durable_objects.bindings]]
 name = "RATE_LIMITER"
 class_name = "RateLimiter"
+
+[[env.prod.durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
 
 [[env.prod.send_email]]
 name = "EMAIL"

@@ -28,6 +28,7 @@ const MAX_DELAY_SECS: u32 = 12 * 60 * 60;
 ///
 /// A job that returns `Err` is retried per the queue's `max_retries` / `retry_delay`, then sent to
 /// its `dead_letter_queue` if one is set, so make `perform` safe to run more than once.
+/// The jobs of one batch run concurrently, so they must not depend on each other's order.
 pub trait Job: Serialize + DeserializeOwned + 'static {
     /// Stored in every message. Renaming it strands jobs already queued under the old name.
     const NAME: &'static str;
@@ -120,31 +121,35 @@ impl Ctx {
 pub type QueueBatch = worker::MessageBatch<Value>;
 
 pub(crate) async fn run_batch(ctx: Ctx, jobs: &Jobs, batch: QueueBatch) -> worker::Result<()> {
-    // shortcut: messages run one at a time; run them concurrently if batches get slow.
-    for msg in batch.messages()? {
-        let attempt = msg.attempts();
-        let (job, result) = match serde_json::from_value::<Envelope>(msg.body().clone()) {
-            Ok(Envelope { job, args }) => {
-                let result = match jobs.0.get(job.as_str()) {
-                    Some(run) => run(args, ctx.clone()).await,
-                    None => Err(Error::internal(format!("no job named `{job}` in Hooks::jobs"))),
-                };
-                (job, result)
-            }
-            Err(e) => ("?".into(), Err(Error::internal(format!("not a doko job message: {e}")))),
-        };
-        match result {
-            Ok(()) => {
-                console_log!("{}", json!({ "level": "info", "job": job, "attempt": attempt, "status": "done" }));
-                msg.ack();
-            }
-            Err(e) => {
-                console_error!("{}", json!({ "level": "error", "job": job, "attempt": attempt, "error": e.message() }));
-                msg.retry();
-            }
+    // Concurrently: a batch of slow jobs takes as long as its slowest one, not their sum.
+    // Each message is acked or retried on its own, so one failure doesn't redeliver the rest.
+    let messages = batch.messages()?;
+    futures_util::future::join_all(messages.iter().map(|msg| run_message(&ctx, jobs, msg))).await;
+    Ok(())
+}
+
+async fn run_message(ctx: &Ctx, jobs: &Jobs, msg: &worker::Message<Value>) {
+    let attempt = msg.attempts();
+    let (job, result) = match serde_json::from_value::<Envelope>(msg.body().clone()) {
+        Ok(Envelope { job, args }) => {
+            let result = match jobs.0.get(job.as_str()) {
+                Some(run) => run(args, ctx.clone()).await,
+                None => Err(Error::internal(format!("no job named `{job}` in Hooks::jobs"))),
+            };
+            (job, result)
+        }
+        Err(e) => ("?".into(), Err(Error::internal(format!("not a doko job message: {e}")))),
+    };
+    match result {
+        Ok(()) => {
+            console_log!("{}", json!({ "level": "info", "job": job, "attempt": attempt, "status": "done" }));
+            msg.ack();
+        }
+        Err(e) => {
+            console_error!("{}", json!({ "level": "error", "job": job, "attempt": attempt, "error": e.message() }));
+            msg.retry();
         }
     }
-    Ok(())
 }
 
 pub(crate) async fn run_tasks(ctx: Ctx, lookup: impl Fn(&str, Ctx) -> Option<TaskFuture>, event: ScheduledEvent) {

@@ -42,6 +42,9 @@ struct DokoToml {
     /// Cron tasks: `name = "schedule"`. Handlers are registered in `Hooks::tasks`.
     #[serde(default)]
     tasks: BTreeMap<String, String>,
+    /// Settings for `doko::auth`: see [`Auth`].
+    #[serde(default)]
+    auth: Table,
     #[serde(flatten)]
     bindings: Bindings,
     #[serde(default)]
@@ -64,9 +67,42 @@ struct Env {
     /// Each task listed here replaces the top-level schedule of the same name.
     #[serde(default)]
     tasks: BTreeMap<String, String>,
+    /// Each key listed here replaces the top-level `[auth]` key of the same name.
+    #[serde(default)]
+    auth: Table,
     /// Each binding listed here replaces the top-level one of the same name.
     #[serde(flatten)]
     bindings: Bindings,
+}
+
+/// `[auth]`, read by `doko::auth` from the `DOKO_AUTH` var. Every key is optional.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Auth {
+    session_ttl_secs: Option<u64>,
+    session_cookie: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
+    jwks_url: Option<String>,
+}
+
+fn check_auth(auth: &Table) -> Result<(), String> {
+    let a: Auth = auth.clone().try_into().map_err(|e| format!("[auth]: {e}"))?;
+    // KV, the default session store, can't expire keys sooner than this.
+    if a.session_ttl_secs.is_some_and(|ttl| ttl < 60) {
+        return Err("[auth]: `session_ttl_secs` must be at least 60".into());
+    }
+    let is_cookie_name = |n: &String| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !a.session_cookie.as_ref().is_none_or(is_cookie_name) {
+        return Err("[auth]: `session_cookie` must be letters, digits, `_` or `-`".into());
+    }
+    if [&a.jwt_issuer, &a.jwt_audience].into_iter().flatten().any(|v| v.is_empty()) {
+        return Err("[auth]: `jwt_issuer` and `jwt_audience` must not be empty".into());
+    }
+    if !a.jwks_url.as_ref().is_none_or(|u| u.starts_with("https://") || u.starts_with("http://")) {
+        return Err("[auth]: `jwks_url` must be an http(s) URL".into());
+    }
+    Ok(())
 }
 
 // Field names match wrangler's, so wrangler docs apply as-is.
@@ -152,12 +188,15 @@ struct D1 {
     migrations_dir: Option<String>,
 }
 
-/// A queue this worker both sends to (as the binding) and consumes (running `Hooks::jobs`).
-/// Serialized as wrangler's `[[queues.consumers]]` entry.
+/// A queue this worker sends to (as the binding) and, unless `consume = false`, consumes
+/// (running `Hooks::jobs`). Serialized as wrangler's `[[queues.consumers]]` entry.
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Queue {
     queue: String,
+    /// `false` when another worker consumes this queue: this one only sends to it.
+    #[serde(default = "yes", skip_serializing)]
+    consume: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_batch_size: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +209,10 @@ struct Queue {
     dead_letter_queue: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_concurrency: Option<u32>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -242,6 +285,7 @@ struct Vars {
     DOKO_ENV: String,
     DOKO_CONFIG: Table,
     DOKO_TASKS: BTreeMap<String, String>,
+    DOKO_AUTH: Table,
 }
 
 pub struct Output {
@@ -289,8 +333,10 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         let mut config = cfg.config.clone();
         let mut b = cfg.bindings.clone();
         let mut tasks = cfg.tasks.clone();
+        let mut auth = cfg.auth.clone();
         if let Some(e) = cfg.env.get(env) {
             merge(&mut config, &e.config);
+            merge(&mut auth, &e.auth);
             tasks.extend(e.tasks.clone());
             b.queues.extend(e.bindings.queues.clone());
             b.kv.extend(e.bindings.kv.clone());
@@ -303,19 +349,20 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         check_binding_names(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
         check_resources(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
         check_and_normalize_tasks(&mut tasks).map_err(|e| format!("doko.toml{at}: {e}"))?;
+        check_auth(&auth).map_err(|e| format!("doko.toml{at}: {e}"))?;
         let mut crons: Vec<String> = tasks.values().cloned().collect();
         crons.sort();
         crons.dedup();
         let queues = (!b.queues.is_empty()).then(|| Queues {
             producers: b.queues.iter().map(|(k, q)| Producer { binding: k.clone(), queue: q.queue.clone() }).collect(),
-            consumers: b.queues.values().cloned().collect(),
+            consumers: b.queues.values().filter(|q| q.consume).cloned().collect(),
         });
         let durable_objects = (!b.durable.is_empty()).then(|| DurableObjects {
             bindings: b.durable.iter().map(|(k, d)| DoBinding { name: k.clone(), class_name: d.class_name.clone() }).collect(),
         });
         let r = Resources {
             triggers: Triggers { crons },
-            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config, DOKO_TASKS: tasks },
+            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config, DOKO_TASKS: tasks, DOKO_AUTH: auth },
             kv_namespaces: bound(&b.kv),
             r2_buckets: bound(&b.r2),
             d1_databases: bound(&b.d1),
@@ -585,6 +632,29 @@ mod tests {
         assert_eq!(v["env"]["prod"]["queues"]["consumers"][0]["queue"].as_str(), Some("jobs-prod"));
         assert!(o.bindings_rs.unwrap().contains("pub const JOBS: doko::QueueBinding"));
         assert!(err("[queues.JOBS]\nqueue = \"j\"\nretries = 1\n").contains("retries"));
+
+        // A producer-only queue gets the binding but no consumer.
+        let v = parse("[queues.JOBS]\nqueue = \"jobs\"\n[queues.EVENTS]\nqueue = \"events\"\nconsume = false\n");
+        assert_eq!(v["queues"]["producers"].as_array().unwrap().len(), 2);
+        let consumers = v["queues"]["consumers"].as_array().unwrap();
+        assert_eq!((consumers.len(), consumers[0]["queue"].as_str()), (1, Some("jobs")));
+        assert!(consumers[0].get("consume").is_none());
+    }
+
+    #[test]
+    fn renders_auth_settings_per_env() {
+        let v = parse("[auth]\nsession_ttl_secs = 3600\njwt_issuer = \"https://dev.example.com\"\n[env.prod.auth]\njwt_issuer = \"https://example.com\"\n");
+        assert_eq!(v["vars"]["DOKO_AUTH"]["jwt_issuer"].as_str(), Some("https://dev.example.com"));
+        let prod = &v["env"]["prod"]["vars"]["DOKO_AUTH"];
+        assert_eq!(prod["jwt_issuer"].as_str(), Some("https://example.com"));
+        assert_eq!(prod["session_ttl_secs"].as_integer(), Some(3600), "inherited");
+        assert!(parse("")["vars"]["DOKO_AUTH"].as_table().unwrap().is_empty());
+
+        assert!(err("[auth]\nsession_ttl = 1\n").contains("session_ttl"));
+        assert!(err("[auth]\nsession_ttl_secs = 59\n").contains("at least 60"));
+        assert!(err("[auth]\nsession_cookie = \"a b\"\n").contains("session_cookie"));
+        assert!(err("[auth]\njwks_url = \"example.com/jwks\"\n").contains("jwks_url"));
+        assert!(err("[env.prod.auth]\njwt_audience = \"\"\n").contains("[env.prod]"));
     }
 
     #[test]

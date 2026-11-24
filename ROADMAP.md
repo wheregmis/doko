@@ -16,13 +16,13 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 |---|---|---|
 | 0. Scaffold | Workspace, `doko::app!(App)`, `doko dev` generating `wrangler.toml` | `app!` is `macro_rules!`; no proc-macro crate |
 | 1. Backend API | `Hooks::routes()`, `Ctx` (env, config, `wait_until`), per-env config, request id, logging, `doko::Error` → JSON, `generate controller` | No request timeout (platform enforces limits); middleware is plain `.layer()` |
-| 2. Storage | `ctx.kv::<T>()`, `ctx.bucket()`, `ctx.db()` with `query_as`, `batch()`, `doko migrate` | R2 uploads buffered, multipart only via `.raw()`; no per-env KV prefix |
-| 3. Cache | `get_or_set`, `.cache(Policy::...)` on routes, stale-while-revalidate, tag purges | No `Vary`; no KV second tier |
-| 4. Background work | `Job` trait + `enqueue`, queue dispatch by `NAME`, retries/DLQ, named cron `Tasks` | Batches run one message at a time; queue is always produced and consumed by the same worker |
+| 2. Storage | `ctx.kv::<T>()`, `ctx.bucket()`, `ctx.db()` with `query_as`, `batch()`, `doko migrate`, `Bucket::put_stream` (streamed, multipart past 8 MiB) | Resumable (client-driven) multipart only via `.raw()`; no R2 range requests in `serve` |
+| 3. Cache | `get_or_set`, `.cache(Policy::...)` on routes, stale-while-revalidate, tag purges, `Policy::vary` | A handler's own `Vary` header is not honored; no KV second tier |
+| 4. Background work | `Job` trait + `enqueue`, queue dispatch by `NAME`, retries/DLQ, named cron `Tasks`, concurrent batches, `consume = false` producer-only queues | No consumer-only queues (every `[queues.*]` is also a producer binding); no per-job concurrency cap below `max_batch_size` |
 | 5. DX | `doko new`, `generate job\|migration\|controller`, `doko::test::App`, `doko deploy --env` | Depends on doko by git; tests need Node and `--ignored` |
-| 6. Durable Objects | `[do.NAME]` with generated bindings and append-only class migrations, `DurableObject` trait exported by `doko::app!(App, objects: [..])`, `ctx.durable(NAME)?.get(name)?.fetch(req)`, `RateLimiter` + `.rate_limit(RateLimit::new(..))` | Stubs speak `fetch` only (no RPC helper); no WebSocket handlers; limits key on client IP only; class deletions and renames are hand-written migrations |
-| 7. Auth | `doko::auth`: `Session` extractor (signed cookie, KV or `SessionStore` object), `Claims<T>` for HS256/RS256 JWTs, `sign()`, `hash_password`/`verify_password`, `.require_auth()` | Wired by fixed names (`SESSIONS`, `SESSION_SECRET`, `JWT_SECRET`, `JWT_PUBLIC_KEY`); session TTL fixed at 7 days; one RS256 key, no JWKS or `iss`/`aud` checks; no roles |
-| 10. Email | `[email.NAME]` → `send_email` binding, `ctx.mail(NAME)?.send(&Message { .. })`, `Hooks::on_email` with `InboundEmail::read()` (decoded subject, text, html), `generate mailer` | Plain addresses only; attachments, cc/bcc, custom headers and replies via `.raw()`; no template engine; routing rules are set up outside doko |
+| 6. Durable Objects | `[do.NAME]` with generated bindings and append-only class migrations, `DurableObject` trait exported by `doko::app!(App, objects: [..])`, `ctx.durable(NAME)?.get(name)?.fetch(req)`, `RateLimiter` + `.rate_limit(RateLimit::new(..).key_by(..))`, hibernating WebSockets (`accept_websocket`, `websocket_message/close/error`) | Stubs speak `fetch` only (no RPC helper); class deletions and renames are hand-written migrations (deleting destroys data, so doko won't write it) |
+| 7. Auth | `doko::auth`: `Session` extractor (signed cookie, KV or `SessionStore` object), `Claims<T>` for HS256/RS256 JWTs, `sign()`, `hash_password`/`verify_password`, `.require_auth()`, `[auth]` in doko.toml (session TTL and cookie name, `iss`/`aud`, JWKS with key rotation) | Binding and secret names are fixed by convention (`SESSIONS`, `SESSION_SECRET`, `JWT_SECRET`, `JWT_PUBLIC_KEY`); RS256 only for third-party tokens (no ES256); roles are left to the app |
+| 10. Email | `[email.NAME]` → `send_email` binding, `ctx.mail(NAME)?.send(&Message { .. })` with cc/bcc, headers, attachments and named `from`/`reply_to`, `escape_html`, `Hooks::on_email` with `InboundEmail::read()` (decoded subject, text, html, attachments), `generate mailer` | Recipients are plain addresses (the binding takes no names for them); inline images and replies via `.raw()`; no template engine; routing rules are set up outside doko |
 
 ## Next
 
@@ -44,12 +44,10 @@ Phases 8 and 9 are on hold until the foundation is solid: hardening and the back
 
 Limits from the shipped phases, picked up when a user needs them:
 - Publish to crates.io so `doko new` stops depending on git.
-- Streaming R2 uploads and a multipart helper.
-- `Vary` support in the response cache.
-- Concurrent processing of queue batches.
-- Rate limit keys other than client IP (per user), and WebSocket handlers on Durable Objects.
-- Email: named addresses, attachments and cc/bcc on `Message`; an HTML-escaping helper or templates for mailers.
-- Auth: configurable session TTL and cookie name, JWKS with key rotation, `iss`/`aud` checks.
+- A request timeout (`[app] request_timeout_secs`), if hung upstreams become a problem: the platform caps CPU time, not wall time.
+- Honor a handler's own `Vary` header in the response cache.
+- An RPC helper for Durable Object stubs; ES256 JWTs; an integration test for JWKS.
+- Templates for mailers.
 - A proc-macro crate, only if a feature can't be done with `macro_rules!` and traits.
 
 ## Risks

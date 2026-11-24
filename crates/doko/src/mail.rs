@@ -7,9 +7,10 @@
 
 use mail_parser::MessageParser;
 use worker::{
-    ForwardableEmailMessage, SendEmail, SendEmailBuilder,
-    js_sys::{self, Reflect},
+    EmailAddress, EmailAttachment, ForwardableEmailMessage, SendEmail, SendEmailBuilder,
+    js_sys::{self, Reflect, Uint8Array},
     send::{SendFuture, SendWrapper},
+    wasm_bindgen::JsCast,
 };
 
 use crate::{Error, Result};
@@ -32,17 +33,67 @@ fn js_error(e: js_sys::Error) -> Error {
 /// }).await?;
 /// ```
 ///
-/// Addresses are plain (`ada@example.com`). `from` must be on a domain onboarded to Email Sending.
+/// `from` must be on a domain onboarded to Email Sending. It and `reply_to` may carry a display
+/// name: `Ada Lovelace <ada@example.com>`. Recipients are plain addresses.
 /// Set at least one of `text` and `html`; mail with both reaches more inboxes.
 #[derive(Clone, Debug, Default)]
 pub struct Message {
     pub from: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
     pub subject: String,
     pub text: Option<String>,
-    /// Escape anything a user typed before putting it in here.
+    /// Put anything a user typed through [`escape_html`] first.
     pub html: Option<String>,
     pub reply_to: Option<String>,
+    /// Extra headers, e.g. `("X-Entity-Ref-ID".into(), id)`. Email Sending decides which names it accepts.
+    pub headers: Vec<(String, String)>,
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file attached to a [`Message`], or found in an [`EmailBody`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Attachment {
+    pub filename: String,
+    /// The MIME type, e.g. `application/pdf`.
+    pub content_type: String,
+    pub content: Vec<u8>,
+}
+
+/// Escapes text for use in HTML, in element content and in quoted attributes alike.
+pub fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Splits `Name <address>` into its parts. A plain address has no name.
+fn split_address(address: &str) -> (Option<&str>, &str) {
+    let named = address.trim().strip_suffix('>').and_then(|a| a.rsplit_once('<'));
+    match named {
+        Some((name, address)) => (Some(name.trim().trim_matches('"')).filter(|n| !n.is_empty()), address.trim()),
+        None => (None, address.trim()),
+    }
+}
+
+impl Message {
+    /// Every value that ends up in a mail header, where a line break could smuggle in another one.
+    fn header_values(&self) -> impl Iterator<Item = &String> {
+        let recipients = self.to.iter().chain(&self.cc).chain(&self.bcc);
+        let headers = self.headers.iter().flat_map(|(name, value)| [name, value]);
+        let attachments = self.attachments.iter().flat_map(|a| [&a.filename, &a.content_type]);
+        recipients.chain([&self.from, &self.subject]).chain(&self.reply_to).chain(headers).chain(attachments)
+    }
 }
 
 /// An `[email.NAME]` binding, from [`Ctx::mail`](crate::Ctx::mail).
@@ -51,28 +102,61 @@ pub struct Mailer(pub(crate) SendWrapper<SendEmail>);
 impl Mailer {
     /// Sends `message` and returns its message id. Under `wrangler dev` the mail is logged, not sent.
     pub async fn send(&self, message: &Message) -> Result<String> {
-        // An address with a line break could smuggle extra headers into the mail.
-        let addresses = message.to.iter().chain([&message.from]).chain(&message.reply_to);
-        if message.to.is_empty() || addresses.chain([&message.subject]).any(|s| s.contains(['\r', '\n'])) {
-            return Err(Error::bad_request("an email needs a recipient, and no line breaks in its addresses or subject"));
+        if message.to.is_empty() || message.header_values().any(|s| s.contains(['\r', '\n'])) {
+            return Err(Error::bad_request(
+                "an email needs a recipient, and no line breaks in its addresses, subject, headers or file names",
+            ));
         }
         SendFuture::new(async {
-            let mut email = SendEmailBuilder::builder_with_str_and_slice(&message.from, &message.to, &message.subject);
+            let address = |a: &str| match split_address(a) {
+                (Some(name), email) => Ok(EmailAddress::new(name, email)),
+                (None, email) => Err(email.to_owned()),
+            };
+            let email = SendEmailBuilder::new_with_str_and_slice(split_address(&message.from).1, &message.to, &message.subject);
+            if let Ok(from) = address(&message.from) {
+                email.set_from_with_email_address(&from);
+            }
+            match message.reply_to.as_deref().map(address) {
+                Some(Ok(named)) => email.set_reply_to_with_email_address(&named),
+                Some(Err(plain)) => email.set_reply_to(&plain),
+                None => {}
+            }
+            if !message.cc.is_empty() {
+                email.set_cc_with_slice(&message.cc);
+            }
+            if !message.bcc.is_empty() {
+                email.set_bcc_with_slice(&message.bcc);
+            }
             if let Some(text) = &message.text {
-                email = email.text(text);
+                email.set_text(text);
             }
             if let Some(html) = &message.html {
-                email = email.html(html);
+                email.set_html(html);
             }
-            if let Some(reply_to) = &message.reply_to {
-                email = email.reply_to(reply_to);
+            if !message.headers.is_empty() {
+                let headers = js_sys::Object::new();
+                for (name, value) in &message.headers {
+                    Reflect::set(&headers, &name.into(), &value.into()).map_err(|e| Error::internal(format!("{e:?}")))?;
+                }
+                email.set_headers(headers.unchecked_ref());
             }
-            Ok(self.0.send_with_builder(&email.build()).await.map_err(js_error)?.message_id())
+            if !message.attachments.is_empty() {
+                let files: Vec<EmailAttachment> = message
+                    .attachments
+                    .iter()
+                    .map(|a| {
+                        let content = Uint8Array::from(a.content.as_slice());
+                        EmailAttachment::new_attachment_with_typed_array(&a.filename, &a.content_type, &content)
+                    })
+                    .collect();
+                email.set_attachments(&files);
+            }
+            Ok(self.0.send_with_builder(&email).await.map_err(js_error)?.message_id())
         })
         .await
     }
 
-    /// The underlying binding, for attachments, cc/bcc and custom headers. Its futures are not `Send`.
+    /// The underlying binding, for inline images and raw MIME messages. Its futures are not `Send`.
     pub fn raw(&self) -> &SendEmail {
         &self.0
     }
@@ -88,6 +172,7 @@ pub struct EmailBody {
     /// The plain-text body, or the HTML body converted to text when there is no plain one.
     pub text: Option<String>,
     pub html: Option<String>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl InboundEmail {
@@ -135,6 +220,17 @@ fn parse(raw: &[u8]) -> Option<EmailBody> {
         text: message.body_text(0).map(|t| t.into_owned()),
         // `body_html` would also turn a plain-text body into HTML; only report HTML that was sent.
         html: message.html_body().find_map(|part| part.html_utf8()).map(|h| h.into_owned()),
+        attachments: message
+            .attachments()
+            .map(|part| Attachment {
+                filename: part.attachment_name().unwrap_or_default().to_owned(),
+                content_type: part.content_type().map_or_else(
+                    || "application/octet-stream".to_owned(),
+                    |ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("octet-stream")),
+                ),
+                content: part.decoded().into_owned(),
+            })
+            .collect(),
     })
 }
 
@@ -154,5 +250,37 @@ mod tests {
         let body = parse(multipart).unwrap();
         assert_eq!(body.text.as_deref().map(str::trim), Some("plain"));
         assert_eq!(body.html.as_deref().map(str::trim), Some("<p>rich</p>"));
+        assert!(body.attachments.is_empty());
+
+        let attached = b"Subject: Report\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\
+            --b\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n\
+            --b\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"r.csv\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nYSxiCjEsMg==\r\n--b--\r\n";
+        let body = parse(attached).unwrap();
+        assert_eq!(body.text.as_deref().map(str::trim), Some("see attached"));
+        let file = Attachment { filename: "r.csv".into(), content_type: "text/csv".into(), content: b"a,b\n1,2".to_vec() };
+        assert_eq!(body.attachments, [file]);
+    }
+
+    #[test]
+    fn splits_named_addresses() {
+        assert_eq!(split_address("ada@example.com"), (None, "ada@example.com"));
+        assert_eq!(split_address("Ada Lovelace <ada@example.com>"), (Some("Ada Lovelace"), "ada@example.com"));
+        assert_eq!(split_address(" \"Lovelace, Ada\" < ada@example.com > "), (Some("Lovelace, Ada"), "ada@example.com"));
+        assert_eq!(split_address("<ada@example.com>"), (None, "ada@example.com"));
+    }
+
+    #[test]
+    fn escapes_html_and_finds_line_breaks_in_headers() {
+        assert_eq!(escape_html(r#"<a href="x">Tom & 'Jerry'</a>"#), "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#39;Jerry&#39;&lt;/a&gt;");
+        let clean = Message { from: "a@example.com".into(), to: vec!["b@example.com".into()], ..Default::default() };
+        assert!(!clean.header_values().any(|v| v.contains('\n')));
+        for dirty in [
+            Message { cc: vec!["c@example.com\nBcc: x@example.com".into()], ..clean.clone() },
+            Message { headers: vec![("X-A".into(), "1\r\nX-B: 2".into())], ..clean.clone() },
+            Message { attachments: vec![Attachment { filename: "a\n.txt".into(), ..Default::default() }], ..clean.clone() },
+        ] {
+            assert!(dirty.header_values().any(|v| v.contains(['\r', '\n'])));
+        }
     }
 }

@@ -14,8 +14,8 @@ use axum::{
     body::{Body, HttpBody, to_bytes},
     extract::Request,
     http::{
-        HeaderValue, Method, Response, StatusCode, Uri,
-        header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE},
+        HeaderMap, HeaderValue, Method, Response, StatusCode, Uri,
+        header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE, VARY},
     },
     middleware::{self, Next},
     response::IntoResponse,
@@ -142,12 +142,13 @@ pub struct Policy {
     ttl: u64,
     stale: u64,
     tags: Option<(KvBinding, Vec<&'static str>)>,
+    vary: Vec<&'static str>,
 }
 
 impl Policy {
     /// Serve from cache for `secs` after a response is stored.
     pub fn ttl(secs: u64) -> Self {
-        Self { ttl: secs, stale: 0, tags: None }
+        Self { ttl: secs, stale: 0, tags: None, vary: Vec::new() }
     }
 
     /// After the TTL, keep serving the stale copy for `secs` more while refreshing it in the background.
@@ -161,6 +162,14 @@ impl Policy {
         self.tags = Some((kv, tags.to_vec()));
         self
     }
+
+    /// Keep a separate copy per value of these request headers, e.g. `&["accept-language"]`, and
+    /// name them in the response's `Vary`. Every distinct value is its own cache entry, so pick
+    /// headers with few values: not `cookie` or `user-agent`.
+    pub fn vary(mut self, headers: &[&'static str]) -> Self {
+        self.vary = headers.to_vec();
+        self
+    }
 }
 
 /// Adds `.cache(policy)`, `.rate_limit(limit)` and `.require_auth()` to routers.
@@ -170,7 +179,7 @@ pub trait RouterExt {
     /// Responses carry `x-doko-cache: HIT | STALE | MISS | BYPASS`.
     fn cache(self, policy: Policy) -> Self;
 
-    /// Limits requests per client IP to the routes added so far, counted together. Over the limit,
+    /// Limits requests per client IP (or [`RateLimit::key_by`](crate::RateLimit::key_by)) to the routes added so far, counted together. Over the limit,
     /// they get a 429 with `retry-after`. If the limiter itself fails, they get a 500.
     fn rate_limit(self, limit: crate::RateLimit) -> Self;
 
@@ -194,12 +203,22 @@ impl RouterExt for Router<Ctx> {
 }
 
 async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
+    // Not stored with the response: the Cache API would then match on those request headers itself.
+    let vary = HeaderValue::from_str(&policy.vary.join(", ")).ok().filter(|v| !v.is_empty());
+    let mut res = lookup(policy, req, next).await;
+    if let Some(vary) = vary {
+        res.headers_mut().append(VARY, vary);
+    }
+    res
+}
+
+async fn lookup(policy: Policy, req: Request, next: Next) -> Response<Body> {
     let ctx = req.extensions().get::<Ctx>().cloned();
     let (Some(ctx), true, false) = (ctx, req.method() == Method::GET, req.headers().contains_key(AUTHORIZATION)) else {
         return mark(next.run(req).await, "BYPASS");
     };
     let uri = req.uri().clone();
-    let key = match cache_key(&ctx, &policy, &uri).await {
+    let key = match cache_key(&ctx, &policy, &uri, req.headers()).await {
         Ok(k) => k,
         Err(e) => {
             console_error!(
@@ -257,7 +276,7 @@ async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
     }
 }
 
-fn restore_headers(headers: &mut axum::http::HeaderMap) {
+fn restore_headers(headers: &mut HeaderMap) {
     headers.remove(STORED_AT);
     headers.remove(CACHE_CONTROL);
     if let Some(cc) = headers.remove(ORIGINAL_CC) {
@@ -316,12 +335,18 @@ async fn put(key: String, stored: Response<Body>) {
     }
 }
 
-/// The request URL, plus the current version of each tag, so bumping a tag changes every key under it.
-async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
+/// The request URL, plus the request's `vary` header values, plus the current version of each tag,
+/// so bumping a tag changes every key under it.
+async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri, headers: &HeaderMap) -> Result<String> {
     let mut key = match uri.scheme() {
         Some(_) => uri.to_string(),
         None => format!("https://doko.local{}", uri.path_and_query().map_or("/", |p| p.as_str())),
     };
+    if !policy.vary.is_empty() {
+        key.push(if key.contains('?') { '&' } else { '?' });
+        key.push_str("__doko_vary=");
+        key.push_str(&vary_key(&policy.vary, headers));
+    }
     if let Some((kv, tags)) = &policy.tags
         && !tags.is_empty()
     {
@@ -335,6 +360,12 @@ async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
         key.push_str(&versions.join("."));
     }
     Ok(key)
+}
+
+/// The values of the `vary` headers, encoded so that no header value can imitate another's.
+fn vary_key(vary: &[&str], headers: &HeaderMap) -> String {
+    let value = |name: &&str| encode(headers.get(*name).and_then(|v| v.to_str().ok()).unwrap_or(""));
+    vary.iter().map(value).collect::<Vec<_>>().join(",")
 }
 
 fn mark(mut res: Response<Body>, status: &'static str) -> Response<Body> {
@@ -379,6 +410,16 @@ mod tests {
         assert_eq!(encode("notes:all"), "notes%3Aall");
         assert_eq!(encode("a b/ü"), "a%20b%2F%C3%BC");
         assert_eq!(encode("ok-_.~9"), "ok-_.~9");
+    }
+
+    #[test]
+    fn keys_vary_headers_apart() {
+        let mut h = HeaderMap::new();
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), ",");
+        h.insert("accept-language", HeaderValue::from_static("de,en"));
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), "de%2Cen,", "a comma in a value can't split the key");
+        h.insert("x-plan", HeaderValue::from_static("pro"));
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), "de%2Cen,pro");
     }
 
     #[test]
