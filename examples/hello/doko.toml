@@ -1,6 +1,11 @@
 [app]
 name = "doko-hello"
 compatibility_date = "2026-11-01"
+# Requests that take longer get a 504. Without it, only the platform's limits apply.
+request_timeout_secs = 10
+# To rename or delete a Durable Object class (deleting destroys its stored data):
+# renamed_classes = [{ from = "Room", to = "ChatRoom" }]
+# deleted_classes = ["Room"]
 
 # Read at runtime with ctx.config::<Config>(). [env.<name>.config] is deep-merged over it.
 [config]

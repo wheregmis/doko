@@ -122,6 +122,21 @@ fn websockets() {
     let app = doko::test::App::start(&[]);
     assert_eq!(websocket_roundtrip(&app, "/rooms/lobby", "hello room"), "hello room");
     assert_eq!(app.get("/rooms/lobby").status, 426, "a plain GET is not an upgrade");
+    // Stub::call: a JSON round trip with the room's object.
+    let members = app.get("/rooms/lobby/members");
+    // 0 or 1: the test's socket was dropped without a close frame, so the room may still list it.
+    assert!(members.status == 200 && members.json::<u64>() <= 1, "{}", members.body);
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn times_out_slow_requests() {
+    let app = doko::test::App::start(&[]);
+    let started = Instant::now();
+    let res = app.get("/slow");
+    assert_eq!((res.status, res.json::<Value>()), (504, json!({ "error": "gateway timeout" })));
+    // request_timeout_secs = 10 in doko.toml; the handler itself would take a minute.
+    assert!((9..30).contains(&started.elapsed().as_secs()), "{:?}", started.elapsed());
 }
 
 /// Signed by the throwaway private key whose public half is JWT_PUBLIC_KEY in .dev.vars; expires in 2100.
@@ -166,6 +181,18 @@ fn auth() {
     assert_eq!(bearer(&format!("{RS256_TOKEN}x")).status, 401);
     assert_eq!(bearer(RS256_WRONG_ISSUER).status, 401, "a valid signature from the wrong `iss` is refused");
     assert_eq!(app.get("/api/me").status, 401);
+
+    // Roles: `/admin` needs a login at all (401), and then the admin role (403).
+    assert_eq!(app.get("/admin").status, 401);
+    assert_eq!(app.send("GET", "/admin", &[("cookie", cookie)], "").status, 403);
+    assert_eq!(bearer(&token).status, 200);
+    assert_eq!(app.send("GET", "/admin", &[("authorization", &format!("Bearer {token}"))], "").status, 403);
+    let admin = json!({ "username": "admin", "password": "correct horse" });
+    assert_eq!(app.post_json("/signup", &admin).status, 201);
+    let admin_login = app.post_json("/login", &admin);
+    let admin_cookie = admin_login.header("set-cookie").unwrap().split(';').next().unwrap().to_owned();
+    let welcomed = app.send("GET", "/admin", &[("cookie", &admin_cookie)], "");
+    assert_eq!((welcomed.status, welcomed.body.as_str()), (200, "welcome, admin"));
 
     // Logout ends the session on the server, so the old cookie stops working.
     let logout = app.send("POST", "/logout", &[("cookie", cookie)], "");

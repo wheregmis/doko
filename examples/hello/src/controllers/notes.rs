@@ -44,11 +44,13 @@ async fn index(ctx: Ctx) -> Result<Json<Vec<Note>>> {
     Ok(Json(ctx.db(DB)?.all("SELECT * FROM notes ORDER BY id", ()).await?))
 }
 
-/// Value caching: the count is computed at most once per 30s per data center.
+/// Value caching: the count is computed at most once per 30s. The KV tier shares it between
+/// data centers, and makes it work on `*.workers.dev`, where the Cache API does nothing.
 async fn count(ctx: Ctx) -> Result<Json<i64>> {
     let db = ctx.db(DB)?;
     let n = ctx
         .cache()
+        .tier(CACHE)
         .get_or_set("notes:count", 30, async {
             let row: Option<serde_json::Value> = db.first("SELECT COUNT(*) AS n FROM notes", ()).await?;
             Ok(row.and_then(|r| r["n"].as_i64()).unwrap_or(0))

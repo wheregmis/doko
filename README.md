@@ -63,7 +63,10 @@ The app crate needs `crate-type = ["cdylib"]` and must depend on `worker` direct
 [app]
 name = "my-app"
 compatibility_date = "2026-11-01"
+request_timeout_secs = 30    # optional: slower requests get a 504
 ```
+
+Workers limit CPU time, not waiting, so without `request_timeout_secs` a handler stuck on a slow upstream holds its request open. The timeout cancels the handler and covers the time until the response starts, not a streamed body.
 
 ## Config and environments
 
@@ -175,12 +178,15 @@ let n = ctx.cache().get_or_set("notes:count", 30, async { count(&db).await }).aw
 - `.cache()` applies to the routes added before it.
 - It caches only 200 GET responses with a known size of 10 MB or less and no `Set-Cookie` or `private`/`no-store` header.
 - Requests with `Authorization` are never cached.
+- A response whose own `Vary` header names something the policy's `.vary()` doesn't is never cached, so a variant can't be served to the wrong request.
 - `.vary(&["accept-language"])` on the policy keeps one copy per value of those request headers and names them in the response's `Vary`. Pick headers with few distinct values.
 - Responses carry `x-doko-cache: HIT | STALE | MISS | BYPASS`.
 
 **How tag purges work.** Each tag stores a version number in the KV namespace you pass, and that version is part of the cache key. A purge bumps the version, so every data center misses on its next lookup. This is global, but takes up to about 60s, which is how long KV writes take to propagate.
 
 **The Cache API does nothing on `*.workers.dev`.** Production needs a custom domain.
+
+**A KV tier for values.** `ctx.cache().tier(CACHE).get_or_set(..)` also writes the value to KV and answers a local miss from it, so a value computed in one data center is reused in all of them, and value caching works on `*.workers.dev`. KV keeps a value for at least 60 seconds, and each local miss costs a KV read.
 
 ## Background jobs and cron tasks
 
@@ -253,7 +259,16 @@ let res = ctx.durable(COUNTER)?.get("page:/home")?.fetch(Request::get("https://d
 ```
 
 - **Migrations.** Wrangler needs a migration for every new class. doko appends one to `wrangler.toml` when a `[do.*]` class first appears, and keeps the earlier ones, so **commit `wrangler.toml`**: it is the migration history.
-- **Removing a class** deletes everything its objects stored, so doko won't write that migration. It stops and prints the `deleted_classes` entry to append to `wrangler.toml` yourself.
+- **Removing or renaming a class.** Deleting a class deletes everything its objects stored, so doko stops when a class disappears from doko.toml until you say which it is, under `[app]`:
+
+  ```toml
+  [app]
+  renamed_classes = [{ from = "Counter", to = "Tally" }]   # keeps the data
+  deleted_classes = ["Room"]                               # destroys the data on the next deploy
+  ```
+
+  Each entry is applied once, so it can stay in doko.toml.
+- **Calling an object with JSON.** `let n: u64 = stub.call("add", &5).await?` POSTs the argument to `/add` of the object's `fetch` and deserializes the reply; an error reply becomes an `Err` with its status.
 - New classes use SQLite-backed storage.
 
 ### WebSockets
@@ -367,7 +382,7 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 - **Strongly consistent sessions.** KV can serve a session for up to a minute after logout in other regions. If that matters, declare `[do.SESSIONS] class_name = "SessionStore"` instead of `[kv.SESSIONS]` and export it: `doko::app!(App, objects: [SessionStore])`.
 - **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp`, `nbf` and the configured `iss` / `aud`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
 - **JWKS.** With `jwks_url`, RS256 tokens are checked against the key their `kid` names. The key set is kept in memory for an hour; an unknown `kid` refetches it, at most once a minute, so rotated keys are picked up without a deploy. Set `jwt_issuer` too, or any tenant of a shared identity provider can mint tokens you accept.
-- **Roles** are yours to define: put them in the claims or the session value and check them in the handler (`Error::forbidden()`).
+- **Roles.** `.require_role("admin")` is `.require_auth()` plus a 403 unless the session value or the JWT claims carry the role, as `"role": "admin"` or `"roles": ["admin", ..]`. What roles exist and who has them is up to the app.
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
 - **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](examples/hello/src/controllers/auth.rs).
 
@@ -405,7 +420,8 @@ impl Hooks for App {
 - **Sending** needs a domain onboarded to Cloudflare Email Sending (`wrangler email sending enable example.com`), and `from` must be on it. It is for transactional mail, not newsletters.
 - **Receiving** needs an Email Routing rule that delivers an address to this worker. Without an `on_email`, mail is rejected. An `Err` fails the delivery, so the sending server retries or bounces. doko logs the sender and recipient of every inbound mail.
 - **More fields.** `cc`, `bcc`, `reply_to`, `headers: vec![("X-Entity-Ref-ID".into(), id)]` and `attachments: vec![Attachment { filename, content_type, content }]`. `from` and `reply_to` may carry a display name: `"Ada Lovelace <ada@example.com>"`. Inbound attachments are in `email.read().await?.attachments`.
-- **Escape user input** with `doko::escape_html` before putting it in `html`. `send` refuses line breaks in addresses, the subject, headers and file names.
+- **Templates.** `doko::render_html(include_str!("welcome.html"), &json!({ "name": user.name }))?` fills `{{ name }}` placeholders (dots reach nested values) and HTML-escapes every value. `render_text` does the same without escaping, for `text`. A placeholder with no value is an error. There are no loops or conditions.
+- **Escape user input** with `doko::escape_html` (or a template) before putting it in `html`. `send` refuses line breaks in addresses, the subject, headers and file names.
 - **Locally,** `doko dev` logs sent mail instead of sending it (set `remote = true` on the binding to send for real). To deliver a test mail, POST a raw message, with a `Message-ID` header, to wrangler's local endpoint:
 
 ```bash

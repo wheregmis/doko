@@ -1,12 +1,14 @@
 //! Chat rooms over WebSockets: `GET /rooms/{name}` upgrades, and each message goes to everyone in the room.
+//! `GET /rooms/{name}/members` asks the room how many are connected.
 
 use doko::{
     Ctx, DurableObject, Result,
     axum::{
-        Router,
+        Json, Router,
         body::Body,
         extract::{Path, Request},
-        http::Response,
+        http::{Method, Response},
+        response::IntoResponse,
         routing::get,
     },
 };
@@ -15,7 +17,12 @@ use worker::{Env, WebSocket, WebSocketIncomingMessage, durable::State};
 use crate::bindings::ROOMS;
 
 pub fn routes() -> Router<Ctx> {
-    Router::new().route("/rooms/{name}", get(join))
+    Router::new().route("/rooms/{name}", get(join)).route("/rooms/{name}/members", get(members))
+}
+
+/// A JSON call to the object: the reply is deserialized, and an error reply becomes an `Err`.
+async fn members(ctx: Ctx, Path(name): Path<String>) -> Result<Json<usize>> {
+    Ok(Json(ctx.durable(ROOMS)?.get(&name)?.call("members", &()).await?))
 }
 
 /// Hands the upgrade request to the room's object, which answers with the client's socket.
@@ -32,6 +39,9 @@ impl DurableObject for Room {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response<Body>> {
+        if req.method() == Method::POST && req.uri().path() == "/members" {
+            return Ok(Json(self.0.get_websockets().len()).into_response());
+        }
         doko::accept_websocket(&self.0, &req)
     }
 

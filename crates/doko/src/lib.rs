@@ -32,19 +32,21 @@ pub use durable::{object_alarm, object_result, serve_object};
 pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_websocket};
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
-pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html};
+pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html, render_html, render_text};
 pub use storage::{Bucket, D1Binding, Db, DoBinding, EmailBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
 pub use worker;
 
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, pin::pin, sync::Arc, time::Duration};
 
 use axum::{
     Router,
     body::Body,
     extract::FromRequestParts,
-    http::{Response, request::Parts},
+    http::{Response, StatusCode, request::Parts},
     middleware,
+    response::IntoResponse,
 };
+use futures_util::future::{Either, select};
 use serde::de::DeserializeOwned;
 use tower_service::Service;
 use worker::{Context, Env, HttpRequest, ScheduleContext, ScheduledEvent, send::SendWrapper};
@@ -54,6 +56,8 @@ const CONFIG_VAR: &str = "DOKO_CONFIG";
 const ENV_VAR: &str = "DOKO_ENV";
 /// Var holding `[tasks]` (name → cron schedule) for the active environment.
 const TASKS_VAR: &str = "DOKO_TASKS";
+/// Var holding `[app] request_timeout_secs`, when set.
+const TIMEOUT_VAR: &str = "DOKO_REQUEST_TIMEOUT_SECS";
 
 #[derive(Clone)]
 enum Exec {
@@ -181,7 +185,19 @@ pub async fn dispatch_fetch(
     // Middleware (e.g. the response cache) reads Ctx from here; handlers get it as state.
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
-    Ok(router.with_state(ctx).call(req).await?)
+    let timeout = ctx.var(TIMEOUT_VAR).and_then(|secs| secs.parse::<u64>().ok());
+    let response = router.with_state(ctx).call(req);
+    let Some(secs) = timeout else {
+        return Ok(response.await?);
+    };
+    // The platform limits CPU time, not waiting: without this, a hung upstream holds the request open.
+    // Losing the race drops the handler's future, which cancels whatever it was awaiting.
+    match select(pin!(response), pin!(worker::Delay::from(Duration::from_secs(secs)))).await {
+        Either::Left((response, _)) => Ok(response?),
+        Either::Right(_) => {
+            Ok(Error::new(StatusCode::GATEWAY_TIMEOUT, format!("no response within {secs}s")).into_response())
+        }
+    }
 }
 
 #[doc(hidden)]

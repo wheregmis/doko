@@ -6,6 +6,8 @@
 //! message as the body delivers one.
 
 use mail_parser::MessageParser;
+use serde::Serialize;
+use serde_json::Value;
 use worker::{
     EmailAddress, EmailAttachment, ForwardableEmailMessage, SendEmail, SendEmailBuilder,
     js_sys::{self, Reflect, Uint8Array},
@@ -75,6 +77,43 @@ pub fn escape_html(text: &str) -> String {
         }
     }
     out
+}
+
+/// Fills a template's `{{ name }}` placeholders from `vars`, HTML-escaping every value, for
+/// [`Message::html`]. Nested values are reached with dots: `{{ user.name }}`.
+///
+/// ```ignore
+/// let html = doko::render_html(include_str!("welcome.html"), &json!({ "name": user.name }))?;
+/// ```
+///
+/// A placeholder with no value is an error, so a typo can't send a mail with a hole in it.
+/// There is no logic (loops, conditions): build such parts in Rust and pass them through
+/// [`render_text`] if they are already safe HTML.
+pub fn render_html(template: &str, vars: &impl Serialize) -> Result<String> {
+    render(template, &serde_json::to_value(vars)?, true)
+}
+
+/// Like [`render_html`] without the escaping, for [`Message::text`] and subjects.
+pub fn render_text(template: &str, vars: &impl Serialize) -> Result<String> {
+    render(template, &serde_json::to_value(vars)?, false)
+}
+
+fn render(template: &str, vars: &Value, escape: bool) -> Result<String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some((before, after)) = rest.split_once("{{") {
+        let (name, after) = after.split_once("}}").ok_or_else(|| Error::internal("template: `{{` without `}}`"))?;
+        let value = match vars.pointer(&format!("/{}", name.trim().replace('.', "/"))) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => return Err(Error::internal(format!("template: no value for `{}`", name.trim()))),
+            Some(other) => other.to_string(),
+        };
+        out.push_str(before);
+        out.push_str(&if escape { escape_html(&value) } else { value });
+        rest = after;
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Splits `Name <address>` into its parts. A plain address has no name.
@@ -260,6 +299,17 @@ mod tests {
         assert_eq!(body.text.as_deref().map(str::trim), Some("see attached"));
         let file = Attachment { filename: "r.csv".into(), content_type: "text/csv".into(), content: b"a,b\n1,2".to_vec() };
         assert_eq!(body.attachments, [file]);
+    }
+
+    #[test]
+    fn renders_templates() {
+        let vars = serde_json::json!({ "user": { "name": "Ada <3" }, "count": 2 });
+        let template = "<p>Hi {{ user.name }}, you have {{count}} notes.</p>";
+        assert_eq!(render_html(template, &vars).unwrap(), "<p>Hi Ada &lt;3, you have 2 notes.</p>");
+        assert_eq!(render_text("Hi {{user.name}}", &vars).unwrap(), "Hi Ada <3");
+        assert_eq!(render_text("no placeholders", &vars).unwrap(), "no placeholders");
+        assert!(render_html("{{ user.nmae }}", &vars).unwrap_err().message().contains("user.nmae"));
+        assert!(render_html("{{ user.name", &vars).is_err());
     }
 
     #[test]

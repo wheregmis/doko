@@ -38,6 +38,8 @@ impl Hooks for App {
             )
             // Cached per language: each `accept-language` value gets its own copy.
             .merge(Router::new().route("/language", get(language)).cache(Policy::ttl(60).vary(&["accept-language"])))
+            // Slower than `request_timeout_secs` in doko.toml, so it answers 504.
+            .route("/slow", get(slow))
             .merge(controllers::routes())
     }
 
@@ -64,6 +66,12 @@ async fn index(ctx: Ctx) -> Result<String> {
 
 async fn language(headers: HeaderMap) -> String {
     headers.get(ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()).unwrap_or("none").to_owned()
+}
+
+async fn slow() -> &'static str {
+    // worker's timer is !Send; SendFuture lets an axum handler await it.
+    worker::send::SendFuture::new(worker::Delay::from(std::time::Duration::from_secs(60))).await;
+    "finally"
 }
 
 async fn health(ctx: Ctx) -> Json<Value> {

@@ -35,6 +35,6 @@ async fn create(ctx: Ctx, Json(c): Json<Contact>) -> Result<StatusCode> {
         return Err(Error::bad_request("a valid email and a message are required"));
     }
     let to = ctx.config::<Config>()?.contact_to;
-    ctx.mail(EMAIL)?.send(&contact::message(&to, &c.email, &c.message)).await?;
+    ctx.mail(EMAIL)?.send(&contact::message(&to, &c.email, &c.message)?).await?;
     Ok(StatusCode::ACCEPTED)
 }

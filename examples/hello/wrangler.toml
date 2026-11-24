@@ -19,6 +19,7 @@ crons = ["*/30 * * * *"]
 
 [vars]
 DOKO_ENV = "dev"
+DOKO_REQUEST_TIMEOUT_SECS = "10"
 
 [vars.DOKO_CONFIG]
 contact_to = "owner@example.com"
@@ -72,6 +73,7 @@ crons = ["0 3 * * *"]
 
 [env.prod.vars]
 DOKO_ENV = "prod"
+DOKO_REQUEST_TIMEOUT_SECS = "10"
 
 [env.prod.vars.DOKO_CONFIG]
 contact_to = "owner@example.com"

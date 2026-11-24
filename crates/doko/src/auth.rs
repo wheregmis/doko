@@ -536,21 +536,30 @@ impl FromRequestParts<Ctx> for Session {
     }
 }
 
-/// The middleware behind `RouterExt::require_auth`.
-pub(crate) async fn require(mut req: Request, next: Next) -> Response<Body> {
+/// Whether the claims or session value names `role`: `"role": "admin"` or `"roles": ["admin", ..]`.
+fn has_role(who: &Value, role: &str) -> bool {
+    who["role"] == role || who["roles"].as_array().is_some_and(|roles| roles.iter().any(|r| r == role))
+}
+
+/// The middleware behind `RouterExt::require_auth` and, with a `role`, `require_role`.
+pub(crate) async fn require(role: Option<&'static str>, mut req: Request, next: Next) -> Response<Body> {
     let token = bearer(req.headers()).map(str::to_owned);
     let headers = req.headers().clone();
     let ctx = req.extensions().get::<Ctx>().cloned();
     let checked = async {
         let ctx = ctx.ok_or_else(|| Error::internal("require_auth: request has no Ctx"))?;
         if let Some(token) = token {
-            return verify_jwt(&ctx, &token).await.map(|_| None);
+            return verify_jwt(&ctx, &token).await.map(|claims| (claims, None));
         }
         let session = Session::load(&ctx, &headers).await?;
-        if session.data.is_some() { Ok(Some(session)) } else { Err(Error::unauthorized()) }
+        match session.data.clone() {
+            Some(data) => Ok((data, Some(session))),
+            None => Err(Error::unauthorized()),
+        }
     };
     match checked.await {
-        Ok(session) => {
+        Ok((who, _)) if role.is_some_and(|role| !has_role(&who, role)) => Error::forbidden().into_response(),
+        Ok((_, session)) => {
             if let Some(session) = session {
                 // Handed to the `Session` extractor, so the store is read once per request.
                 req.extensions_mut().insert(session);
@@ -637,6 +646,15 @@ mod tests {
         assert!(!in_validity_window(&json!({ "exp": 100 }), 100), "exp is exclusive");
         assert!(!in_validity_window(&json!({ "nbf": 101 }), 100));
         assert!(!in_validity_window(&json!({ "exp": "tomorrow" }), 100), "a malformed exp is not ignored");
+    }
+
+    #[test]
+    fn finds_roles() {
+        assert!(has_role(&json!({ "role": "admin" }), "admin"));
+        assert!(has_role(&json!({ "roles": ["editor", "admin"] }), "admin"));
+        assert!(!has_role(&json!({ "roles": ["editor"] }), "admin"));
+        assert!(!has_role(&json!({ "role": "administrator", "roles": "admin" }), "admin"));
+        assert!(!has_role(&json!({}), "admin"));
     }
 
     #[test]

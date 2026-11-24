@@ -56,6 +56,21 @@ struct DokoToml {
 struct App {
     name: String,
     compatibility_date: String,
+    /// Requests that take longer get a 504. Unset: no limit beyond the platform's.
+    request_timeout_secs: Option<u64>,
+    /// Durable Object classes to delete, WITH THEIR STORED DATA, on the next deploy.
+    #[serde(default)]
+    deleted_classes: Vec<String>,
+    /// Durable Object classes to rename, keeping their data.
+    #[serde(default)]
+    renamed_classes: Vec<Rename>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    from: String,
+    to: String,
 }
 
 #[derive(Deserialize)]
@@ -286,6 +301,9 @@ struct Vars {
     DOKO_CONFIG: Table,
     DOKO_TASKS: BTreeMap<String, String>,
     DOKO_AUTH: Table,
+    // A string: wrangler vars that are numbers don't read back as text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    DOKO_REQUEST_TIMEOUT_SECS: Option<String>,
 }
 
 pub struct Output {
@@ -317,6 +335,9 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             "doko.toml: app.compatibility_date `{}` must be YYYY-MM-DD",
             cfg.app.compatibility_date
         ));
+    }
+    if cfg.app.request_timeout_secs == Some(0) {
+        return Err("doko.toml: app.request_timeout_secs must be at least 1".into());
     }
     for name in cfg.env.keys() {
         let valid = !name.is_empty()
@@ -362,7 +383,13 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         });
         let r = Resources {
             triggers: Triggers { crons },
-            vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config, DOKO_TASKS: tasks, DOKO_AUTH: auth },
+            vars: Vars {
+                DOKO_ENV: env.to_owned(),
+                DOKO_CONFIG: config,
+                DOKO_TASKS: tasks,
+                DOKO_AUTH: auth,
+                DOKO_REQUEST_TIMEOUT_SECS: cfg.app.request_timeout_secs.map(|s| s.to_string()),
+            },
             kv_namespaces: bound(&b.kv),
             r2_buckets: bound(&b.r2),
             d1_databases: bound(&b.d1),
@@ -393,7 +420,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         env.insert(name.as_str(), r);
     }
     check_binding_names(&all).map_err(|e| format!("doko.toml: {e}"))?;
-    let migrations = migrations(previous_wrangler_toml, &classes)?;
+    let migrations = migrations(previous_wrangler_toml, &classes, &cfg.app)?;
     let app = &cfg.app;
     let wrangler = Wrangler {
         name: &app.name,
@@ -419,8 +446,9 @@ struct Previous {
     migrations: Vec<Table>,
 }
 
-/// The previous migrations, plus one creating the declared classes that don't exist yet.
-fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>) -> Result<Vec<Table>, String> {
+/// The previous migrations, plus one for what doko.toml asks for that hasn't happened yet: the
+/// renames and deletions under `[app]`, and the declared classes that don't exist.
+fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>, app: &App) -> Result<Vec<Table>, String> {
     let mut migrations = toml::from_str::<Previous>(previous_wrangler_toml)
         .map_err(|e| format!("wrangler.toml: reading existing Durable Object migrations: {e}"))?
         .migrations;
@@ -441,20 +469,45 @@ fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>) -> Resul
             live.remove(&class);
         }
     }
-    // Deleting a class destroys everything its objects stored, so doko never writes that migration itself.
+    // Both lists are applied once: an entry whose migration is already in the history does nothing,
+    // so it can stay in doko.toml.
+    let mut renamed = Vec::new();
+    for r in &app.renamed_classes {
+        if live.contains(&r.from) && !live.contains(&r.to) {
+            live.remove(&r.from);
+            live.insert(r.to.clone());
+            let mut t = Table::new();
+            t.insert("from".into(), Value::String(r.from.clone()));
+            t.insert("to".into(), Value::String(r.to.clone()));
+            renamed.push(Value::Table(t));
+        }
+    }
+    let mut deleted = Vec::new();
+    for class in &app.deleted_classes {
+        if classes.contains(class) {
+            return Err(format!("doko.toml: class `{class}` is in app.deleted_classes but still has a [do.<NAME>] entry"));
+        }
+        if live.remove(class) {
+            deleted.push(Value::String(class.clone()));
+        }
+    }
+    // Deleting a class destroys everything its objects stored, so doko only does it when told to.
     if let Some(gone) = live.difference(classes).next() {
         return Err(format!(
             "doko.toml: Durable Object class `{gone}` has a migration in wrangler.toml but no [do.<NAME>] entry. \
-             Restore the entry, or, to delete the class AND ITS STORED DATA on the next deploy, append this to wrangler.toml:\n\n\
-             [[migrations]]\ntag = \"v{}\"\ndeleted_classes = [\"{gone}\"]\n",
-            migrations.len() + 1
+             Restore the entry. Or, under [app], add `renamed_classes = [{{ from = \"{gone}\", to = \"<NewName>\" }}]` \
+             if you renamed it, or `deleted_classes = [\"{gone}\"]` to delete the class AND ITS STORED DATA on the next deploy."
         ));
     }
     let new: Vec<Value> = classes.difference(&live).cloned().map(Value::String).collect();
-    if !new.is_empty() {
-        let mut m = Table::new();
+    let mut m = Table::new();
+    for (key, values) in [("new_sqlite_classes", new), ("renamed_classes", renamed), ("deleted_classes", deleted)] {
+        if !values.is_empty() {
+            m.insert(key.into(), Value::Array(values));
+        }
+    }
+    if !m.is_empty() {
         m.insert("tag".into(), Value::String(format!("v{}", migrations.len() + 1)));
-        m.insert("new_sqlite_classes".into(), Value::Array(new));
         migrations.push(m);
     }
     Ok(migrations)
@@ -680,15 +733,45 @@ mod tests {
         assert_eq!(m[0]["new_sqlite_classes"].as_array().unwrap().len(), 1);
         assert_eq!(m[1]["new_sqlite_classes"][0].as_str(), Some("Room"));
 
-        // Removing a class is refused until its deletion is written by hand; then it can come back.
+        // Removing a class is refused until doko.toml says to delete it (or the migration is written by hand).
         let e = render_over(APP, &o.wrangler_toml).err().unwrap();
-        assert!(e.contains("deleted_classes = [\"Counter\"]") && e.contains("tag = \"v2\""), "{e}");
+        assert!(e.contains("deleted_classes = [\"Counter\"]") && e.contains("renamed_classes"), "{e}");
         let deleted = format!("{}\n[[migrations]]\ntag = \"v2\"\ndeleted_classes = [\"Counter\"]\n", o.wrangler_toml);
         assert!(!render_over(APP, &deleted).unwrap().wrangler_toml.contains("durable_objects"));
         let back: Table = toml::from_str(&render_over(&format!("{APP}{DO}"), &deleted).unwrap().wrangler_toml).unwrap();
         assert_eq!(back["migrations"][2]["new_sqlite_classes"][0].as_str(), Some("Counter"));
         assert!(err("[do.C]\nclass_name = \"my-class\"\n").contains("Rust type name"));
         assert!(render_over(APP, "not toml =").is_err());
+    }
+
+    #[test]
+    fn renames_and_deletes_classes_when_told_to() {
+        let app = |extra: &str| format!("[app]\nname = \"hello\"\ncompatibility_date = \"2026-11-01\"\n{extra}");
+        let v1 = render(&app("[do.A]\nclass_name = \"Counter\"\n[do.B]\nclass_name = \"Room\"\n")).unwrap().wrangler_toml;
+
+        // Counter becomes Tally (keeping its data) and Room goes away, in one migration.
+        let next = app("renamed_classes = [{ from = \"Counter\", to = \"Tally\" }]\ndeleted_classes = [\"Room\"]\n[do.A]\nclass_name = \"Tally\"\n");
+        let v2 = render_over(&next, &v1).unwrap().wrangler_toml;
+        let t: Table = toml::from_str(&v2).unwrap();
+        let m = t["migrations"].as_array().unwrap();
+        assert_eq!((m.len(), m[1]["tag"].as_str()), (2, Some("v2")));
+        assert_eq!(m[1]["renamed_classes"][0]["to"].as_str(), Some("Tally"));
+        assert_eq!(m[1]["deleted_classes"][0].as_str(), Some("Room"));
+        assert!(m[1].get("new_sqlite_classes").is_none(), "a renamed class is not created again");
+
+        // The entries can stay in doko.toml: applied once, they do nothing.
+        assert_eq!(render_over(&next, &v2).unwrap().wrangler_toml, v2);
+        let both = app("deleted_classes = [\"Room\"]\n[do.B]\nclass_name = \"Room\"\n");
+        assert!(render_over(&both, &v1).err().unwrap().contains("still has a [do.<NAME>] entry"));
+    }
+
+    #[test]
+    fn renders_the_request_timeout() {
+        let v: Table = toml::from_str(&render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 30\n[env.prod]\n").unwrap().wrangler_toml).unwrap();
+        assert_eq!(v["vars"]["DOKO_REQUEST_TIMEOUT_SECS"].as_str(), Some("30"));
+        assert_eq!(v["env"]["prod"]["vars"]["DOKO_REQUEST_TIMEOUT_SECS"].as_str(), Some("30"));
+        assert!(parse("")["vars"].get("DOKO_REQUEST_TIMEOUT_SECS").is_none());
+        assert!(render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 0\n").is_err());
     }
 
     #[test]

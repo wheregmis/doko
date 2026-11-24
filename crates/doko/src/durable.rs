@@ -7,16 +7,17 @@
 use std::time::Duration;
 
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Query, Request},
     http::{
         Response, StatusCode,
-        header::{RETRY_AFTER, UPGRADE},
+        header::{CONTENT_TYPE, RETRY_AFTER, UPGRADE},
     },
     middleware::Next,
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use worker::{
     Date, Env, WebSocket, WebSocketIncomingMessage, WebSocketPair,
     durable::{ObjectNamespace, State},
@@ -149,7 +150,38 @@ impl Stub {
         .await
     }
 
-    /// The underlying stub, for RPC and TCP sockets. Its futures are not `Send`.
+    /// Calls the object with JSON: POSTs `args` to `path` of its [`DurableObject::fetch`] and
+    /// reads the reply as `R`. A reply that isn't a success becomes an `Err` with its status,
+    /// and the message when the object answered with a doko [`Error`].
+    ///
+    /// ```ignore
+    /// let n: u64 = ctx.durable(COUNTER)?.get("home")?.call("add", &5).await?;
+    ///
+    /// // In the object:
+    /// async fn fetch(&self, req: Request) -> Result<Response<Body>> {
+    ///     match req.uri().path() {
+    ///         "/add" => {
+    ///             let Json(by): Json<u64> = Json::from_request(req, &()).await?;
+    ///             Ok(Json(self.add(by).await?).into_response())
+    ///         }
+    ///         _ => Err(Error::not_found()),
+    ///     }
+    /// }
+    /// ```
+    pub async fn call<A: Serialize, R: DeserializeOwned>(&self, path: &str, args: &A) -> Result<R> {
+        let uri = format!("https://doko.do/{}", path.trim_start_matches('/'));
+        let req = Request::post(uri).header(CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_vec(args)?))?;
+        let res = self.fetch(req).await?;
+        let status = res.status();
+        let body = to_bytes(res.into_body(), usize::MAX).await?;
+        if !status.is_success() {
+            let message = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(str::to_owned));
+            return Err(Error::new(status, message.unwrap_or_else(|| format!("object answered {status}"))));
+        }
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    /// The underlying stub, for JS RPC and TCP sockets. Its futures are not `Send`.
     pub fn raw(&self) -> &worker::Stub {
         &self.0
     }
