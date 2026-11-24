@@ -21,17 +21,11 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 4. Background work | `Job` trait + `enqueue`, queue dispatch by `NAME`, retries/DLQ, named cron `Tasks` | Batches run one message at a time; queue is always produced and consumed by the same worker |
 | 5. DX | `doko new`, `generate job\|migration\|controller`, `doko::test::App`, `doko deploy --env` | Depends on doko by git; tests need Node and `--ignored` |
 | 6. Durable Objects | `[do.NAME]` with generated bindings and append-only class migrations, `DurableObject` trait exported by `doko::app!(App, objects: [..])`, `ctx.durable(NAME)?.get(name)?.fetch(req)`, `RateLimiter` + `.rate_limit(RateLimit::new(..))` | Stubs speak `fetch` only (no RPC helper); no WebSocket handlers; limits key on client IP only; class deletions and renames are hand-written migrations |
+| 7. Auth | `doko::auth`: `Session` extractor (signed cookie, KV or `SessionStore` object), `Claims<T>` for HS256/RS256 JWTs, `sign()`, `hash_password`/`verify_password`, `.require_auth()` | Wired by fixed names (`SESSIONS`, `SESSION_SECRET`, `JWT_SECRET`, `JWT_PUBLIC_KEY`); session TTL fixed at 7 days; one RS256 key, no JWKS or `iss`/`aud` checks; no roles |
 
 ## Next
 
 Each phase ends with the `hello` example using the feature and an integration test through `doko::test::App`.
-
-### Phase 7: auth
-- Sessions: signed cookie holding a session id, store backed by KV (default) or a DO for strong consistency; `Session` extractor.
-- JWT: `Claims<T>` extractor verifying HS256/RS256 with the key from `env.secret()`; `doko::auth::sign()` for issuing.
-- `RequireAuth` layer returning 401 through `doko::Error`.
-- Password hashing helper that runs within Workers' CPU limits.
-- **Milestone:** login/logout routes and a protected route in `hello`.
 
 ### Phase 8: Hyperdrive / Postgres
 - `[hyperdrive.NAME]` binding; `ctx.pg("NAME")` giving a connection over the Hyperdrive connection string.
@@ -56,7 +50,8 @@ Limits from the shipped phases, picked up when a user needs them:
 - Streaming R2 uploads and a multipart helper.
 - `Vary` support in the response cache.
 - Concurrent processing of queue batches.
-- Rate limit keys other than client IP (per user, once auth lands), and WebSocket handlers on Durable Objects.
+- Rate limit keys other than client IP (per user), and WebSocket handlers on Durable Objects.
+- Auth: configurable session TTL and cookie name, JWKS with key rotation, `iss`/`aud` checks.
 - A proc-macro crate, only if a feature can't be done with `macro_rules!` and traits.
 
 ## Risks

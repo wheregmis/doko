@@ -25,6 +25,9 @@ prune = "*/30 * * * *"
 [[kv_namespaces]]
 binding = "CACHE"
 
+[[kv_namespaces]]
+binding = "SESSIONS"
+
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "doko-hello-files"
@@ -61,6 +64,9 @@ prune = "0 3 * * *"
 
 [[env.prod.kv_namespaces]]
 binding = "CACHE"
+
+[[env.prod.kv_namespaces]]
+binding = "SESSIONS"
 
 [[env.prod.r2_buckets]]
 binding = "FILES"

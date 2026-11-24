@@ -11,7 +11,7 @@ A batteries-included Rust framework for Cloudflare Workers.</p>
 
 A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
 
-doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron and Durable Objects all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects and auth all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
 
 **What's in the basket**
 
@@ -23,6 +23,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Cache](#cache) | response caching with stale-while-revalidate and global tag purges |
 | [Jobs and cron](#background-jobs-and-cron-tasks) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
 | [Durable Objects](#durable-objects-and-rate-limits) | a `DurableObject` trait, typed stubs, and a per-route rate limiter built on them |
+| [Auth](#auth) | cookie sessions, JWTs, password hashing, `.require_auth()` |
 | [Generators](#generators) | `doko new`, `generate controller \| job \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
@@ -267,6 +268,52 @@ doko::app!(App, objects: [RateLimiter]);
 - The client is the `cf-connecting-ip` header. Local dev has none, so all local requests share one counter.
 - If the limiter can't be reached, requests get a 500 instead of passing unlimited.
 
+## Auth
+
+`doko::auth` is wired by name, so there is nothing to configure in code:
+
+| Feature | Needs |
+|---|---|
+| Sessions | secret `SESSION_SECRET`, and `[kv.SESSIONS]` in doko.toml |
+| JWTs (HS256, issued by you) | secret `JWT_SECRET` |
+| JWTs (RS256, issued elsewhere) | secret `JWT_PUBLIC_KEY`: the issuer's public key as PEM |
+
+Set secrets with `wrangler secret put`, or in `.dev.vars` locally.
+
+```rust
+use doko::{RouterExt, auth::{self, Claims, Session, SetCookie}};
+
+Router::new()
+    .route("/me", get(me))
+    .require_auth()                       // 401 without a session or a valid bearer JWT
+    .route("/login", post(login))
+    .route("/logout", post(logout))
+    .route("/api/me", get(api_me))
+
+async fn login(ctx: Ctx, session: Session, Json(c): Json<Credentials>) -> Result<(SetCookie, Json<Value>)> {
+    let user = find_user(&ctx, &c.username).await?.ok_or_else(Error::unauthorized)?;
+    if !auth::verify_password(&c.password, &user.password_hash).await? {
+        return Err(Error::unauthorized());
+    }
+    let token = auth::sign(&ctx, &user, 3600).await?;                 // HS256 JWT, valid for an hour
+    Ok((session.set(&user).await?, Json(json!({ "token": token }))))  // return the cookie
+}
+
+async fn logout(session: Session) -> Result<SetCookie> { session.clear().await }
+
+async fn me(session: Session) -> Result<Json<User>> {
+    session.get()?.map(Json).ok_or_else(Error::unauthorized)
+}
+
+async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 401 unless the token is valid
+```
+
+- **Sessions.** The cookie (`HttpOnly; Secure; SameSite=Lax`) holds a random id signed with `SESSION_SECRET`; the data lives in KV for 7 days. `session.set` and `session.clear` return a `SetCookie` that must go out with the response. `set` always issues a new id.
+- **Strongly consistent sessions.** KV can serve a session for up to a minute after logout in other regions. If that matters, declare `[do.SESSIONS] class_name = "SessionStore"` instead of `[kv.SESSIONS]` and export it: `doko::app!(App, objects: [SessionStore])`.
+- **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp` and `nbf`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
+- **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
+- **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](examples/hello/src/controllers/auth.rs).
+
 ## Integration tests
 
 `doko::test::App` runs your worker under `wrangler dev` (on a free port, with empty local state) and gives you an HTTP client. Enable it for tests only:
@@ -286,5 +333,7 @@ fn creates_notes() {
     let note: Note = res.json();
 }
 ```
+
+`app.send(method, path, headers, body)` sends any request, and `res.header("set-cookie")` reads a response header.
 
 Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).

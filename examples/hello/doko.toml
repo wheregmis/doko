@@ -20,6 +20,10 @@ prune = "0 3 * * *"
 # IDs are optional locally; set them per env once the resources exist.
 [kv.CACHE]
 
+# Session data for doko::auth::Session. For strongly consistent sessions, declare
+# [do.SESSIONS] class_name = "SessionStore" instead and export SessionStore in src/lib.rs.
+[kv.SESSIONS]
+
 [r2.FILES]
 bucket_name = "doko-hello-files"
 
