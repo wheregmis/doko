@@ -60,6 +60,10 @@ binding!(
     /// An `[email.NAME]` sending binding from doko.toml.
     EmailBinding
 );
+binding!(
+    /// A `[hyperdrive.NAME]` Postgres binding from doko.toml, for `Ctx::pg` (feature `pg`).
+    HyperdriveBinding
+);
 
 pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
     move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))

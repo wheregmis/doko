@@ -135,6 +135,39 @@ struct Bindings {
     durable: BTreeMap<String, Do>,
     #[serde(default)]
     email: BTreeMap<String, Email>,
+    #[serde(default)]
+    hyperdrive: BTreeMap<String, Hyperdrive>,
+    /// `[ai]`: Workers AI, bound as `AI` for `ctx.ai()`.
+    ai: Option<Ai>,
+}
+
+/// A Hyperdrive config pointing at a Postgres database, for `ctx.pg(NAME)`.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Hyperdrive {
+    /// From `wrangler hyperdrive create`. Not needed for `doko dev`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    /// The database `doko dev` and `doko migrate --pg` use. Local credentials only: this file is committed.
+    #[serde(rename(serialize = "localConnectionString"), skip_serializing_if = "Option::is_none")]
+    local_connection_string: Option<String>,
+}
+
+/// `[ai]` has no settings yet.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Ai {}
+
+/// Wrangler insists on an `id` even for local dev, where it is never used. A binding without one
+/// gets this, which makes a deploy fail with a pointer to what is missing.
+const HYPERDRIVE_ID_UNSET: &str = "set-id-in-doko-toml-before-deploying";
+
+/// The name `ctx.ai()` looks up.
+const AI_BINDING: &str = "AI";
+
+#[derive(Serialize)]
+struct AiBinding {
+    binding: &'static str,
 }
 
 /// A `send_email` binding. The optional fields restrict who it may send to or from.
@@ -285,6 +318,10 @@ struct Resources {
     durable_objects: Option<DurableObjects>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     send_email: Vec<Named<Email>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hyperdrive: Vec<Bound<Hyperdrive>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ai: Option<AiBinding>,
 }
 
 #[derive(Serialize)]
@@ -314,6 +351,8 @@ pub struct Output {
     pub d1: Vec<String>,
     /// D1 binding names per environment (including `"dev"`), for `doko migrate`.
     pub d1_by_env: BTreeMap<String, Vec<String>>,
+    /// Hyperdrive bindings of the `dev` environment with their local database, for `doko migrate --pg`.
+    pub hyperdrive: BTreeMap<String, Option<String>>,
 }
 
 pub fn render(doko_toml: &str) -> Result<Output, String> {
@@ -365,6 +404,8 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             b.d1.extend(e.bindings.d1.clone());
             b.durable.extend(e.bindings.durable.clone());
             b.email.extend(e.bindings.email.clone());
+            b.hyperdrive.extend(e.bindings.hyperdrive.clone());
+            b.ai = e.bindings.ai.clone().or(b.ai);
         }
         let at = if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") };
         check_binding_names(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
@@ -396,6 +437,14 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             queues,
             durable_objects,
             send_email: b.email.iter().map(|(k, e)| Named { name: k.clone(), inner: e.clone() }).collect(),
+            hyperdrive: bound(&b.hyperdrive)
+                .into_iter()
+                .map(|mut h| {
+                    h.inner.id.get_or_insert_with(|| HYPERDRIVE_ID_UNSET.to_owned());
+                    h
+                })
+                .collect(),
+            ai: b.ai.as_ref().map(|_| AiBinding { binding: AI_BINDING }),
         };
         Ok((r, b))
     };
@@ -403,6 +452,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
     let (resources, mut all) = resources_for(DEFAULT_ENV)?;
     // Every class in any env: migrations are shared, and an env override may bind a different class.
     let mut classes: BTreeSet<String> = all.durable.values().map(|d| d.class_name.clone()).collect();
+    let hyperdrive = all.hyperdrive.iter().map(|(k, h)| (k.clone(), h.local_connection_string.clone())).collect();
     let mut d1_by_env = BTreeMap::new();
     d1_by_env.insert(DEFAULT_ENV.to_owned(), all.d1.keys().cloned().collect());
     let mut env = BTreeMap::new();
@@ -415,6 +465,8 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         all.d1.extend(b.d1);
         all.durable.extend(b.durable.clone());
         all.email.extend(b.email);
+        all.hyperdrive.extend(b.hyperdrive);
+        all.ai = all.ai.or(b.ai);
         all.queues.extend(b.queues);
         classes.extend(b.durable.into_values().map(|d| d.class_name));
         env.insert(name.as_str(), r);
@@ -437,6 +489,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         bindings_rs: bindings_rs(&all),
         d1: all.d1.into_keys().collect(),
         d1_by_env,
+        hyperdrive,
     })
 }
 
@@ -567,7 +620,13 @@ fn check_resources(b: &Bindings) -> Result<(), String> {
 
 fn check_binding_names(b: &Bindings) -> Result<(), String> {
     let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys()).chain(b.durable.keys()).chain(b.email.keys());
+    let names = names.chain(b.hyperdrive.keys());
     let mut seen = BTreeSet::new();
+    // `[ai]` takes this name in every env that declares it.
+    let ai = AI_BINDING.to_owned();
+    if b.ai.is_some() {
+        seen.insert(&ai);
+    }
     for name in names {
         let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
             && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
@@ -585,17 +644,19 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
 }
 
 fn bindings_rs(b: &Bindings) -> Option<String> {
-    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty() && b.email.is_empty() {
+    let none = b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty();
+    if none && b.email.is_empty() && b.hyperdrive.is_empty() {
         return None;
     }
     let mut s = format!("{BINDINGS_HEADER}\n");
-    let kinds: [(&str, Vec<&String>); 6] = [
+    let kinds: [(&str, Vec<&String>); 7] = [
         ("Kv", b.kv.keys().collect()),
         ("R2", b.r2.keys().collect()),
         ("D1", b.d1.keys().collect()),
         ("Queue", b.queues.keys().collect()),
         ("Do", b.durable.keys().collect()),
         ("Email", b.email.keys().collect()),
+        ("Hyperdrive", b.hyperdrive.keys().collect()),
     ];
     for (kind, names) in kinds {
         for name in names {
@@ -784,6 +845,30 @@ mod tests {
         assert_eq!(prod["allowed_sender_addresses"][0].as_str(), Some("hi@example.com"));
         assert!(o.bindings_rs.unwrap().contains("pub const EMAIL: doko::EmailBinding"));
         assert!(err("[email.EMAIL]\nto = \"x\"\n").contains("to"));
+    }
+
+    #[test]
+    fn renders_hyperdrive_and_ai_bindings() {
+        let o = out(
+            "[ai]\n[hyperdrive.PG]\nlocal_connection_string = \"postgres://u:p@localhost:5432/app\"\n\
+             [env.prod.hyperdrive.PG]\nid = \"abc123\"\n",
+        );
+        let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
+        assert_eq!(v["ai"]["binding"].as_str(), Some("AI"));
+        assert_eq!(v["hyperdrive"][0]["binding"].as_str(), Some("PG"));
+        assert_eq!(v["hyperdrive"][0]["localConnectionString"].as_str(), Some("postgres://u:p@localhost:5432/app"));
+        assert_eq!(v["hyperdrive"][0]["id"].as_str(), Some(HYPERDRIVE_ID_UNSET), "wrangler requires an id, even locally");
+        let prod = &v["env"]["prod"];
+        assert_eq!(prod["ai"]["binding"].as_str(), Some("AI"), "inherited");
+        assert_eq!(prod["hyperdrive"][0]["id"].as_str(), Some("abc123"));
+        assert!(prod["hyperdrive"][0].get("localConnectionString").is_none(), "an env entry replaces the whole binding");
+        assert!(o.bindings_rs.unwrap().contains("pub const PG: doko::HyperdriveBinding"));
+        assert_eq!(o.hyperdrive["PG"].as_deref(), Some("postgres://u:p@localhost:5432/app"));
+
+        assert!(out("[ai]\n").bindings_rs.is_none(), "ctx.ai() needs no constant");
+        assert!(err("[ai]\n[kv.AI]\n").contains("more than once"));
+        assert!(err("[ai]\nmodel = \"x\"\n").contains("model"));
+        assert!(err("[hyperdrive.PG]\nurl = \"x\"\n").contains("url"));
     }
 
     #[test]

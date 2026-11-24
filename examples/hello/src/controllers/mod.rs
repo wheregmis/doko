@@ -8,6 +8,8 @@ pub mod files;
 pub mod auth;
 pub mod contact;
 pub mod rooms;
+pub mod todos;
+pub mod summaries;
 // doko:modules
 
 pub fn routes() -> Router<Ctx> {
@@ -18,5 +20,7 @@ pub fn routes() -> Router<Ctx> {
     .merge(auth::routes())
     .merge(contact::routes())
     .merge(rooms::routes())
+    .merge(todos::routes())
+    .merge(summaries::routes())
     // doko:routes
 }

@@ -2,6 +2,7 @@
 
 mod config;
 mod generate;
+mod pg;
 
 use std::{
     fs,
@@ -16,10 +17,13 @@ usage:
   doko dev [wrangler args]            regenerate, then `wrangler dev`
   doko deploy [wrangler args]         regenerate, then `wrangler deploy` (e.g. --env prod)
   doko migrate [wrangler args]        apply D1 migrations to every D1 binding (local unless --remote)
+  doko migrate --pg [BINDING]         apply migrations/pg/*.sql with psql, to DATABASE_URL if set,
+                                      else to the [hyperdrive.BINDING] local_connection_string
   doko generate controller <name>     scaffold src/controllers/<name>.rs (alias: g)
   doko generate job <name>            scaffold src/jobs/<name>.rs
   doko generate mailer <name>         scaffold src/mailers/<name>.rs
-  doko generate migration <name> [DB] new D1 migration file (DB needed with several D1 bindings)";
+  doko generate migration <name> [DB] new D1 migration file (DB needed with several D1 bindings)
+  doko generate migration <name> --pg new Postgres migration file in migrations/pg/";
 const WRANGLER: &str = "wrangler@4";
 const BINDINGS_RS: &str = "src/bindings.rs";
 
@@ -61,6 +65,19 @@ fn migrate_env<'a>(args: &[&'a str]) -> Result<&'a str, String> {
     Ok(env)
 }
 
+/// The `local_connection_string` of the named `[hyperdrive.*]` binding, or of the only one.
+fn local_database(bindings: &std::collections::BTreeMap<String, Option<String>>, named: &[&str]) -> Result<String, String> {
+    let names = || bindings.keys().cloned().collect::<Vec<_>>().join("|");
+    let (name, local) = match (named, bindings.len()) {
+        ([name], _) => bindings.get_key_value(*name).ok_or_else(|| format!("`{name}` is not a [hyperdrive.<BINDING>] in doko.toml"))?,
+        ([], 1) => bindings.iter().next().expect("one binding"),
+        ([], 0) => return Err("doko.toml declares no [hyperdrive.<BINDING>]".into()),
+        ([], _) => return Err(format!("several Hyperdrive bindings; name one: doko migrate --pg <{}>", names())),
+        _ => return Err(USAGE.to_owned()),
+    };
+    local.clone().ok_or_else(|| format!("[hyperdrive.{name}] has no local_connection_string; set it, or set DATABASE_URL"))
+}
+
 fn wrangler<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<(), String> {
     let status = Command::new("npx")
         .args(["--yes", WRANGLER])
@@ -89,6 +106,19 @@ fn run(args: &[String]) -> Result<(), String> {
         ["dev" | "deploy", ..] => {
             write_config()?;
             wrangler(args)
+        }
+        ["migrate", "--pg", binding @ ..] => {
+            let out = write_config()?;
+            // DATABASE_URL is how a real database is reached: its credentials don't belong in doko.toml.
+            let url = match std::env::var("DATABASE_URL") {
+                Ok(url) if !url.is_empty() => url,
+                _ => local_database(&out.hyperdrive, binding)?,
+            };
+            pg::migrate(Path::new(pg::DIR), &url)
+        }
+        ["generate" | "g", "migration", name, "--pg"] => {
+            println!("wrote {}", pg::generate(Path::new(pg::DIR), name)?);
+            Ok(())
         }
         ["migrate", rest @ ..] => {
             let out = write_config()?;
@@ -160,6 +190,18 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_local_database() {
+        let one = [("PG".to_owned(), Some("postgres://localhost/a".to_owned()))].into_iter().collect();
+        assert_eq!(local_database(&one, &[]).unwrap(), "postgres://localhost/a");
+        assert_eq!(local_database(&one, &["PG"]).unwrap(), "postgres://localhost/a");
+        assert!(local_database(&one, &["OTHER"]).unwrap_err().contains("OTHER"));
+        let two = [("A".to_owned(), None), ("B".to_owned(), None)].into_iter().collect();
+        assert!(local_database(&two, &[]).unwrap_err().contains("<A|B>"));
+        assert!(local_database(&two, &["A"]).unwrap_err().contains("local_connection_string"));
+        assert!(local_database(&Default::default(), &[]).unwrap_err().contains("declares no"));
+    }
 
     #[test]
     fn parses_migrate_env() {

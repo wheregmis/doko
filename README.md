@@ -11,7 +11,7 @@ A batteries-included Rust framework for Cloudflare Workers.</p>
 
 A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
 
-doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth and email all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth, email, Postgres and AI all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
 
 **What's in the basket**
 
@@ -25,6 +25,8 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Durable Objects](#durable-objects-and-rate-limits) | a `DurableObject` trait, typed stubs, and a per-route rate limiter built on them |
 | [Auth](#auth) | cookie sessions, JWTs, password hashing, `.require_auth()` |
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
+| [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
+| [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
 | [Generators](#generators) | `doko new`, `generate controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
@@ -436,6 +438,73 @@ curl 'localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=notes@example.c
 
 `Mailer::raw()` and `InboundEmail::raw()` give the `worker` types, for inline images, raw MIME messages and replies.
 
+## Postgres
+
+Postgres goes through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), which pools connections close to the database. It is behind a feature, so apps that only use D1 don't carry the driver:
+
+```toml
+# Cargo.toml
+doko = { package = "doko-rs", version = "0.1", features = ["pg"] }
+```
+
+```toml
+# doko.toml
+[hyperdrive.PG]
+local_connection_string = "postgres://app:app@127.0.0.1:5432/app"   # used by `doko dev` and `doko migrate --pg`
+
+[env.prod.hyperdrive.PG]
+id = "<id from `wrangler hyperdrive create`>"
+```
+
+```rust
+use crate::bindings::PG;
+
+let pg = ctx.pg(PG).await?;
+let todos: Vec<Todo> = pg.all("SELECT * FROM todos WHERE done = $1 ORDER BY id", (false,)).await?;
+let todo: Option<Todo> = pg.first("INSERT INTO todos (title) VALUES ($1) RETURNING *", (&title,)).await?;
+let changed: u64 = pg.run("UPDATE todos SET done = true WHERE id = $1", (id,)).await?;
+pg.batch(vec![pg.statement("..", (a,))?, pg.statement("..", (b,))?]).await?;   // one transaction
+```
+
+- **Same shape as D1:** `all`, `first`, `run`, `statement` + `batch`, with params as a tuple and rows read by column name. The differences are the placeholders (`$1`, not `?1`), `ctx.pg(..)` being async because it connects, and `run` returning the number of changed rows.
+- **Types.** Text, integers, floats, booleans, `json`/`jsonb`, UUIDs, dates and timestamps are read (the last three as strings). Cast anything else in SQL: `price::text`. Params bind as the type Postgres infers for the placeholder; for a type doko doesn't encode, such as a timestamp, write `$1::text::timestamptz`.
+- **Local credentials only** go in `local_connection_string`: doko.toml is committed. The real database's credentials live in the Hyperdrive config.
+- A binding without an `id` gets a placeholder so `doko dev` works; deploying that env fails until you set the real one.
+
+### Postgres migrations
+
+```bash
+doko generate migration create_todos --pg   # migrations/pg/0001_create_todos.sql
+doko migrate --pg                           # apply to the local database
+DATABASE_URL=postgres://.. doko migrate --pg    # apply to any other database
+```
+
+Wrangler has no Postgres tooling, so this runs `psql`, which must be installed. Each file runs in one transaction and is recorded in a `_doko_migrations` table, so a rerun applies only what is new.
+
+## Workers AI
+
+```toml
+[ai]      # binds Workers AI for ctx.ai()
+```
+
+```rust
+#[derive(Deserialize)]
+struct Answer { response: String }
+
+let input = json!({ "messages": [{ "role": "user", "content": text }] });
+let answer: Answer = ctx.ai()?.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", &input).await?;
+
+// Or stream the answer as it is written: return this from the handler.
+async fn stream(ctx: Ctx, Json(q): Json<Question>) -> Result<Response<Body>> {
+    ctx.ai()?.stream(MODEL, &json!({ "messages": [{ "role": "user", "content": q.text }] })).await
+}
+```
+
+- **Input and output are the model's own shapes**, as serde types or `serde_json::Value`. `wrangler ai models list` shows the current models and `wrangler ai models schema <model>` their shapes; models are retired over time.
+- **`stream`** adds `"stream": true` and answers with server-sent events, one `data: {..}` line per piece and a final `data: [DONE]`.
+- **There is no local AI.** Inference runs on Cloudflare even under `doko dev`, so it needs `wrangler login` and is billed to your account.
+- `ctx.ai()?.raw()` gives the `worker` binding, for image and audio models.
+
 ## Integration tests
 
 `doko::test::App` runs your worker under `wrangler dev` (on a free port, with empty local state) and gives you an HTTP client. Enable it for tests only:
@@ -458,4 +527,4 @@ fn creates_notes() {
 
 `app.send(method, path, headers, body)` sends any request, and `res.header("set-cookie")` reads a response header.
 
-Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. See [examples/hello/tests/app.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/tests/app.rs).
+Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. Postgres needs a database at the `local_connection_string`, and an app with `[ai]` needs `wrangler login` to start. See [examples/hello/tests/app.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/tests/app.rs).
