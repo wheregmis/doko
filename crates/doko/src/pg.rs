@@ -39,7 +39,10 @@ impl Ctx {
             // The connection does the I/O for the client's queries; it ends when the client is dropped.
             worker::wasm_bindgen_futures::spawn_local(async move {
                 if let Err(e) = connection.await {
-                    console_error!("{}", serde_json::json!({ "level": "error", "component": "pg", "error": e.to_string() }));
+                    console_error!(
+                        "{}",
+                        serde_json::json!({ "level": "error", "component": "pg", "error": e.to_string() })
+                    );
                 }
             });
             Ok(Pg(client))
@@ -139,7 +142,9 @@ impl ToSql for Param {
             (Value::Number(n), &Type::INT2) => out.extend_from_slice(&i16::try_from(int(n)?)?.to_be_bytes()),
             (Value::Number(n), &Type::INT4) => out.extend_from_slice(&i32::try_from(int(n)?)?.to_be_bytes()),
             (Value::Number(n), &Type::INT8) => out.extend_from_slice(&int(n)?.to_be_bytes()),
-            (Value::Number(n), &Type::FLOAT4) => out.extend_from_slice(&(n.as_f64().unwrap_or(f64::NAN) as f32).to_be_bytes()),
+            (Value::Number(n), &Type::FLOAT4) => {
+                out.extend_from_slice(&(n.as_f64().unwrap_or(f64::NAN) as f32).to_be_bytes())
+            }
             (Value::Number(n), &Type::FLOAT8) => out.extend_from_slice(&n.as_f64().unwrap_or(f64::NAN).to_be_bytes()),
             (Value::String(s), &Type::UUID) => out.extend_from_slice(&parse_uuid(s).ok_or("not a UUID")?),
             (Value::String(s), &(Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN)) => {
@@ -147,7 +152,9 @@ impl ToSql for Param {
             }
             (Value::Number(n), &(Type::TEXT | Type::VARCHAR)) => out.extend_from_slice(n.to_string().as_bytes()),
             // shortcut: other types (timestamps, numeric, arrays) are not encoded; add them here when needed.
-            (v, ty) => return Err(format!("can't bind {v} as `{ty}`: write the placeholder as `$n::text::{ty}`").into()),
+            (v, ty) => {
+                return Err(format!("can't bind {v} as `{ty}`: write the placeholder as `$n::text::{ty}`").into());
+            }
         }
         Ok(IsNull::No)
     }

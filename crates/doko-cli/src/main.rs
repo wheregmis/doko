@@ -80,16 +80,23 @@ fn migrate_env<'a>(args: &[&'a str]) -> Result<&'a str, String> {
 }
 
 /// The `local_connection_string` of the named `[hyperdrive.*]` binding, or of the only one.
-fn local_database(bindings: &std::collections::BTreeMap<String, Option<String>>, named: &[&str]) -> Result<String, String> {
+fn local_database(
+    bindings: &std::collections::BTreeMap<String, Option<String>>,
+    named: &[&str],
+) -> Result<String, String> {
     let names = || bindings.keys().cloned().collect::<Vec<_>>().join("|");
     let (name, local) = match (named, bindings.len()) {
-        ([name], _) => bindings.get_key_value(*name).ok_or_else(|| format!("`{name}` is not a [hyperdrive.<BINDING>] in doko.toml"))?,
+        ([name], _) => bindings
+            .get_key_value(*name)
+            .ok_or_else(|| format!("`{name}` is not a [hyperdrive.<BINDING>] in doko.toml"))?,
         ([], 1) => bindings.iter().next().expect("one binding"),
         ([], 0) => return Err("doko.toml declares no [hyperdrive.<BINDING>]".into()),
         ([], _) => return Err(format!("several Hyperdrive bindings; name one: doko migrate --pg <{}>", names())),
         _ => return Err(USAGE.to_owned()),
     };
-    local.clone().ok_or_else(|| format!("[hyperdrive.{name}] has no local_connection_string; set it, or set DATABASE_URL"))
+    local
+        .clone()
+        .ok_or_else(|| format!("[hyperdrive.{name}] has no local_connection_string; set it, or set DATABASE_URL"))
 }
 
 /// The D1 binding a command is about: the one named first in `args`, or the only one. Returns it
@@ -118,7 +125,9 @@ fn d1_target<'a>(args: &[&'a str]) -> Vec<&'a str> {
 /// Runs `seeds/*.sql` against `db`, in name order.
 fn seed(db: &str, args: &[&str]) -> Result<(), String> {
     let mut files: Vec<String> = fs::read_dir("seeds")
-        .map(|dir| dir.filter_map(|e| Some(e.ok()?.path().display().to_string())).filter(|f| f.ends_with(".sql")).collect())
+        .map(|dir| {
+            dir.filter_map(|e| Some(e.ok()?.path().display().to_string())).filter(|f| f.ends_with(".sql")).collect()
+        })
         .unwrap_or_default();
     files.sort();
     if files.is_empty() {
@@ -163,17 +172,27 @@ fn before_deploy(out: &config::Output, env: &str, migrate: bool) -> Result<(), S
     let known = out.d1_by_env.get(env).ok_or_else(|| format!("env `{env}` is not defined in doko.toml"))?;
     let env_args: Vec<&str> = if env == "dev" { vec![] } else { vec!["--env", env] };
     if let Some(unset) = out.hyperdrive_without_id.get(env).filter(|b| !b.is_empty()) {
-        return Err(format!("[hyperdrive.{}] has no `id` for env `{env}`; set it from `wrangler hyperdrive create`", unset.join("|")));
+        return Err(format!(
+            "[hyperdrive.{}] has no `id` for env `{env}`; set it from `wrangler hyperdrive create`",
+            unset.join("|")
+        ));
     }
     if !out.secrets.is_empty() {
         match tools::deployed_secrets(env) {
             // A first deploy has no worker to hold secrets yet, so this can only warn.
-            None => eprintln!("warning: could not list the deployed secrets; make sure these are set: {}", out.secrets.join(", ")),
+            None => eprintln!(
+                "warning: could not list the deployed secrets; make sure these are set: {}",
+                out.secrets.join(", ")
+            ),
             Some(listed) => {
                 let missing = tools::missing_secrets(&out.secrets, &listed);
                 if !missing.is_empty() {
-                    let puts: Vec<String> = missing.iter().map(|s| format!("  wrangler secret put {s} {}", env_args.join(" "))).collect();
-                    return Err(format!("not deploying: required secrets are not set for env `{env}`:\n{}", puts.join("\n")));
+                    let puts: Vec<String> =
+                        missing.iter().map(|s| format!("  wrangler secret put {s} {}", env_args.join(" "))).collect();
+                    return Err(format!(
+                        "not deploying: required secrets are not set for env `{env}`:\n{}",
+                        puts.join("\n")
+                    ));
                 }
             }
         }
@@ -191,7 +210,9 @@ fn before_deploy(out: &config::Output, env: &str, migrate: bool) -> Result<(), S
             .map_err(|e| format!("running npx {WRANGLER}: {e}"))?;
         // Declining wrangler's prompt leaves migrations pending, and new code on an old schema fails at runtime.
         if !String::from_utf8_lossy(&listed.stdout).contains("No migrations to apply") {
-            return Err(format!("not deploying: `{db}` still has pending migrations. Apply them, or pass --no-migrate to deploy anyway"));
+            return Err(format!(
+                "not deploying: `{db}` still has pending migrations. Apply them, or pass --no-migrate to deploy anyway"
+            ));
         }
     }
     Ok(())
@@ -303,7 +324,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         ["test", rest @ ..] => {
             write_config()?;
-            let status = Command::new("cargo").args(test_args(rest)).status().map_err(|e| format!("running cargo test: {e}"))?;
+            let status =
+                Command::new("cargo").args(test_args(rest)).status().map_err(|e| format!("running cargo test: {e}"))?;
             if status.success() { Ok(()) } else { Err(format!("cargo test exited with {status}")) }
         }
         ["migrate", "--pg", binding @ ..] => {
@@ -322,10 +344,7 @@ fn run(args: &[String]) -> Result<(), String> {
         ["migrate", rest @ ..] => {
             let out = write_config()?;
             let env = migrate_env(rest)?;
-            let dbs = out
-                .d1_by_env
-                .get(env)
-                .ok_or_else(|| format!("env `{env}` is not defined in doko.toml"))?;
+            let dbs = out.d1_by_env.get(env).ok_or_else(|| format!("env `{env}` is not defined in doko.toml"))?;
             if dbs.is_empty() {
                 return Err(format!("doko.toml declares no [d1.<BINDING>] databases for env `{env}`"));
             }
@@ -377,7 +396,9 @@ fn run(args: &[String]) -> Result<(), String> {
             for path in generate::job(Path::new("."), name)? {
                 println!("wrote {path}");
             }
-            println!("make sure your app has `mod jobs;`, returns `jobs::jobs()` from Hooks::jobs, and has a [queues.<NAME>] in doko.toml");
+            println!(
+                "make sure your app has `mod jobs;`, returns `jobs::jobs()` from Hooks::jobs, and has a [queues.<NAME>] in doko.toml"
+            );
             Ok(())
         }
         ["generate" | "g", "mailer", name] => {
@@ -445,7 +466,9 @@ mod tests {
 
     #[test]
     fn refuses_to_deploy_without_a_hyperdrive_id() {
-        let out = config::render("[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n[hyperdrive.PG]\n[env.prod]\n").unwrap();
+        let out =
+            config::render("[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n[hyperdrive.PG]\n[env.prod]\n")
+                .unwrap();
         assert!(before_deploy(&out, "prod", false).unwrap_err().contains("[hyperdrive.PG] has no `id`"));
         assert!(before_deploy(&out, "nope", false).unwrap_err().contains("not defined"));
         let plain = config::render("[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n").unwrap();
@@ -456,7 +479,10 @@ mod tests {
     fn builds_cargo_test_args() {
         assert_eq!(test_args(&[]), ["test", "--", "--include-ignored"]);
         assert_eq!(test_args(&["--test", "auth"]), ["test", "--test", "auth", "--", "--include-ignored"]);
-        assert_eq!(test_args(&["login", "--", "--nocapture"]), ["test", "login", "--", "--include-ignored", "--nocapture"]);
+        assert_eq!(
+            test_args(&["login", "--", "--nocapture"]),
+            ["test", "login", "--", "--include-ignored", "--nocapture"]
+        );
     }
 
     #[test]

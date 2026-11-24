@@ -32,9 +32,9 @@ pub mod test;
 pub use ai::Ai;
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
+pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_websocket};
 #[doc(hidden)]
 pub use durable::{object_alarm, object_result, serve_object};
-pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_websocket};
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
 pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html, render_html, render_text};
@@ -42,8 +42,8 @@ pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html
 pub use pg::{Pg, PgStatement};
 pub use request::{Errors, Page, Paged, Valid, Validate};
 pub use storage::{
-    Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement,
-    bool_from_sql,
+    Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding,
+    Statement, bool_from_sql,
 };
 pub use worker;
 
@@ -240,12 +240,7 @@ pub async fn dispatch_scheduled(
 }
 
 #[doc(hidden)]
-pub async fn dispatch_queue(
-    jobs: &Jobs,
-    batch: jobs::QueueBatch,
-    env: Env,
-    exec: Context,
-) -> worker::Result<()> {
+pub async fn dispatch_queue(jobs: &Jobs, batch: jobs::QueueBatch, env: Env, exec: Context) -> worker::Result<()> {
     let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
     jobs::run_batch(ctx, jobs, batch).await
 }

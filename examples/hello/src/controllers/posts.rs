@@ -4,9 +4,7 @@ use doko::{
 };
 
 pub fn routes() -> Router<Ctx> {
-    Router::new()
-        .route("/posts", get(index))
-        .route("/posts/{id}", get(show))
+    Router::new().route("/posts", get(index)).route("/posts/{id}", get(show))
 }
 
 async fn index(_ctx: Ctx) -> Result<Json<Vec<String>>> {

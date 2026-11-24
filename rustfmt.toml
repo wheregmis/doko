@@ -1,0 +1,3 @@
+# The width the code was written at. `Max` lets short expressions use it instead of wrapping early.
+max_width = 120
+use_small_heuristics = "Max"

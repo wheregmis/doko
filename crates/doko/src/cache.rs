@@ -263,7 +263,9 @@ impl RouterExt for Router<Ctx> {
     }
 
     fn require_role(self, role: &'static str) -> Self {
-        self.route_layer(middleware::from_fn(move |req: Request, next: Next| crate::auth::require(Some(role), req, next)))
+        self.route_layer(middleware::from_fn(move |req: Request, next: Next| {
+            crate::auth::require(Some(role), req, next)
+        }))
     }
 }
 
@@ -405,7 +407,8 @@ async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body
     if h.remove(VARY).is_some() {
         h.insert(ORIGINAL_VARY, HeaderValue::from_str(&vary).ok()?);
     }
-    let cache_control = HeaderValue::from_str(&format!("public, max-age={max_age}")).expect("digits are valid header bytes");
+    let cache_control =
+        HeaderValue::from_str(&format!("public, max-age={max_age}")).expect("digits are valid header bytes");
     h.insert(CACHE_CONTROL, cache_control);
     h.insert(STORED_AT, HeaderValue::from(Date::now().as_millis()));
     Some((Response::from_parts(parts, Body::from(bytes)), Some(stored)))
@@ -537,4 +540,3 @@ mod tests {
         assert!(!cache_control_forbids_caching(""));
     }
 }
-

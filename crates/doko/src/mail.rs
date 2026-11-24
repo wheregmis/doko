@@ -105,7 +105,9 @@ fn render(template: &str, vars: &Value, escape: bool) -> Result<String> {
         let (name, after) = after.split_once("}}").ok_or_else(|| Error::internal("template: `{{` without `}}`"))?;
         let value = match vars.pointer(&format!("/{}", name.trim().replace('.', "/"))) {
             Some(Value::String(s)) => s.clone(),
-            Some(Value::Null) | None => return Err(Error::internal(format!("template: no value for `{}`", name.trim()))),
+            Some(Value::Null) | None => {
+                return Err(Error::internal(format!("template: no value for `{}`", name.trim())));
+            }
             Some(other) => other.to_string(),
         };
         out.push_str(before);
@@ -151,7 +153,8 @@ impl Mailer {
                 (Some(name), email) => Ok(EmailAddress::new(name, email)),
                 (None, email) => Err(email.to_owned()),
             };
-            let email = SendEmailBuilder::new_with_str_and_slice(split_address(&message.from).1, &message.to, &message.subject);
+            let email =
+                SendEmailBuilder::new_with_str_and_slice(split_address(&message.from).1, &message.to, &message.subject);
             if let Ok(from) = address(&message.from) {
                 email.set_from_with_email_address(&from);
             }
@@ -175,7 +178,8 @@ impl Mailer {
             if !message.headers.is_empty() {
                 let headers = js_sys::Object::new();
                 for (name, value) in &message.headers {
-                    Reflect::set(&headers, &name.into(), &value.into()).map_err(|e| Error::internal(format!("{e:?}")))?;
+                    Reflect::set(&headers, &name.into(), &value.into())
+                        .map_err(|e| Error::internal(format!("{e:?}")))?;
                 }
                 email.set_headers(headers.unchecked_ref());
             }
@@ -297,7 +301,8 @@ mod tests {
             Content-Transfer-Encoding: base64\r\n\r\nYSxiCjEsMg==\r\n--b--\r\n";
         let body = parse(attached).unwrap();
         assert_eq!(body.text.as_deref().map(str::trim), Some("see attached"));
-        let file = Attachment { filename: "r.csv".into(), content_type: "text/csv".into(), content: b"a,b\n1,2".to_vec() };
+        let file =
+            Attachment { filename: "r.csv".into(), content_type: "text/csv".into(), content: b"a,b\n1,2".to_vec() };
         assert_eq!(body.attachments, [file]);
     }
 
@@ -316,19 +321,28 @@ mod tests {
     fn splits_named_addresses() {
         assert_eq!(split_address("ada@example.com"), (None, "ada@example.com"));
         assert_eq!(split_address("Ada Lovelace <ada@example.com>"), (Some("Ada Lovelace"), "ada@example.com"));
-        assert_eq!(split_address(" \"Lovelace, Ada\" < ada@example.com > "), (Some("Lovelace, Ada"), "ada@example.com"));
+        assert_eq!(
+            split_address(" \"Lovelace, Ada\" < ada@example.com > "),
+            (Some("Lovelace, Ada"), "ada@example.com")
+        );
         assert_eq!(split_address("<ada@example.com>"), (None, "ada@example.com"));
     }
 
     #[test]
     fn escapes_html_and_finds_line_breaks_in_headers() {
-        assert_eq!(escape_html(r#"<a href="x">Tom & 'Jerry'</a>"#), "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#39;Jerry&#39;&lt;/a&gt;");
+        assert_eq!(
+            escape_html(r#"<a href="x">Tom & 'Jerry'</a>"#),
+            "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#39;Jerry&#39;&lt;/a&gt;"
+        );
         let clean = Message { from: "a@example.com".into(), to: vec!["b@example.com".into()], ..Default::default() };
         assert!(!clean.header_values().any(|v| v.contains('\n')));
         for dirty in [
             Message { cc: vec!["c@example.com\nBcc: x@example.com".into()], ..clean.clone() },
             Message { headers: vec![("X-A".into(), "1\r\nX-B: 2".into())], ..clean.clone() },
-            Message { attachments: vec![Attachment { filename: "a\n.txt".into(), ..Default::default() }], ..clean.clone() },
+            Message {
+                attachments: vec![Attachment { filename: "a\n.txt".into(), ..Default::default() }],
+                ..clean.clone()
+            },
         ] {
             assert!(dirty.header_values().any(|v| v.contains(['\r', '\n'])));
         }

@@ -2,12 +2,7 @@
 
 use doko::{
     Ctx, Error, Errors, Policy, Result, RouterExt, Valid, Validate,
-    axum::{
-        Json, Router,
-        extract::Path,
-        http::StatusCode,
-        routing::get,
-    },
+    axum::{Json, Router, extract::Path, http::StatusCode, routing::get},
 };
 use serde::{Deserialize, Serialize};
 

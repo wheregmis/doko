@@ -180,7 +180,9 @@ pub(crate) async fn run_tasks(ctx: Ctx, lookup: impl Fn(&str, Ctx) -> Option<Tas
         };
         match result {
             Ok(()) => console_log!("{}", json!({ "level": "info", "task": name, "cron": cron })),
-            Err(e) => console_error!("{}", json!({ "level": "error", "task": name, "cron": cron, "error": e.message() })),
+            Err(e) => {
+                console_error!("{}", json!({ "level": "error", "task": name, "cron": cron, "error": e.message() }))
+            }
         }
     }
 }

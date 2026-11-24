@@ -10,7 +10,10 @@ pub fn message(to: &str, visitor: &str, text: &str) -> Result<Message> {
         subject: "New contact form message".into(),
         text: Some(format!("From: {visitor}\n\n{text}\n")),
         // Every value is escaped, so the visitor's words can't inject markup into the mail.
-        html: Some(render_html("<p>From: {{ visitor }}</p><p>{{ text }}</p>", &json!({ "visitor": visitor, "text": text }))?),
+        html: Some(render_html(
+            "<p>From: {{ visitor }}</p><p>{{ text }}</p>",
+            &json!({ "visitor": visitor, "text": text }),
+        )?),
         reply_to: Some(visitor.into()),
         ..Default::default()
     })

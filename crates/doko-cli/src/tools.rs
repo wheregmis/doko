@@ -53,9 +53,9 @@ pub fn routes_in(file: &str, src: &str) -> Vec<Route> {
         let Some(path) = args.trim_start().strip_prefix('"').and_then(|rest| rest.split('"').next()) else { continue };
         let handlers = &args[args.find(',').map_or(args.len(), |i| i + 1)..];
         let calls = |method: &str| {
-            handlers.match_indices(&format!("{method}(")).any(|(i, _)| {
-                !handlers[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
-            })
+            handlers
+                .match_indices(&format!("{method}("))
+                .any(|(i, _)| !handlers[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
         };
         let methods = METHODS.into_iter().filter(|m| calls(m)).collect();
         let line = src[..start].matches('\n').count() + 1;
@@ -102,13 +102,18 @@ pub fn print_routes(routes: &[Route]) {
 
 /// The names set in a `.dev.vars` file.
 pub fn dev_vars(text: &str) -> Vec<&str> {
-    text.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| Some(l.split_once('=')?.0.trim())).collect()
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| Some(l.split_once('=')?.0.trim()))
+        .collect()
 }
 
 /// The first line a command prints, if it runs and succeeds.
 fn first_line(program: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_owned())
 }
 
 /// The secrets set on the deployed worker for `env`, or `None` if they can't be listed (not
@@ -138,13 +143,24 @@ pub fn doctor(root: &Path, config: Result<&Output, &str>, env: Option<&str>) -> 
             println!("PROBLEM  {name}: {fix}");
         }
     };
-    check("node", first_line("node", &["--version"]).ok_or_else(|| "not found; wrangler needs Node 20 or newer: https://nodejs.org".into()));
+    check(
+        "node",
+        first_line("node", &["--version"])
+            .ok_or_else(|| "not found; wrangler needs Node 20 or newer: https://nodejs.org".into()),
+    );
     check("npx", first_line("npx", &["--version"]).ok_or_else(|| "not found; it ships with Node".into()));
     check(
         "wasm target",
         match first_line("rustup", &["target", "list", "--installed"]) {
             None => Ok("rustup not found, so not checked".into()),
-            Some(_) if Command::new("rustup").args(["target", "list", "--installed"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-unknown-unknown")) => Ok("wasm32-unknown-unknown is installed".into()),
+            Some(_)
+                if Command::new("rustup")
+                    .args(["target", "list", "--installed"])
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32-unknown-unknown")) =>
+            {
+                Ok("wasm32-unknown-unknown is installed".into())
+            }
             Some(_) => Err("run `rustup target add wasm32-unknown-unknown`".into()),
         },
     );
@@ -159,32 +175,48 @@ pub fn doctor(root: &Path, config: Result<&Output, &str>, env: Option<&str>) -> 
         }
     };
     if !out.hyperdrive.is_empty() {
-        check("psql", first_line("psql", &["--version"]).ok_or_else(|| "not found; `doko migrate --pg` needs it".into()));
+        check(
+            "psql",
+            first_line("psql", &["--version"]).ok_or_else(|| "not found; `doko migrate --pg` needs it".into()),
+        );
     }
     let dev = fs::read_to_string(root.join(".dev.vars")).unwrap_or_default();
     let local = dev_vars(&dev);
     for secret in &out.secrets {
         let set = local.contains(&secret.as_str());
-        check(&format!("secret {secret} (local)"), if set { Ok("set in .dev.vars".into()) } else { Err(format!("add `{secret}=..` to .dev.vars")) });
+        check(
+            &format!("secret {secret} (local)"),
+            if set { Ok("set in .dev.vars".into()) } else { Err(format!("add `{secret}=..` to .dev.vars")) },
+        );
     }
     for (name, bindings) in out.hyperdrive_without_id.iter().filter(|(name, _)| *name != "dev") {
         let result = if bindings.is_empty() {
             Ok("every Hyperdrive binding has an id".to_owned())
         } else {
-            Err(format!("[env.{name}.hyperdrive.{}] needs the `id` from `wrangler hyperdrive create`", bindings.join("|")))
+            Err(format!(
+                "[env.{name}.hyperdrive.{}] needs the `id` from `wrangler hyperdrive create`",
+                bindings.join("|")
+            ))
         };
         check(&format!("env {name}"), result);
     }
     if let Some(env) = env {
         let flag = if env == "dev" { String::new() } else { format!(" --env {env}") };
         match deployed_secrets(env) {
-            None => check(&format!("secrets ({env})"), Err("could not list them: run `wrangler login`, or deploy this env once".into())),
+            None => check(
+                &format!("secrets ({env})"),
+                Err("could not list them: run `wrangler login`, or deploy this env once".into()),
+            ),
             Some(listed) => {
                 let missing = missing_secrets(&out.secrets, &listed);
                 let result = if missing.is_empty() {
                     Ok(format!("{} required, all set", out.secrets.len()))
                 } else {
-                    Err(missing.iter().map(|s| format!("`wrangler secret put {s}{flag}`")).collect::<Vec<_>>().join(", "))
+                    Err(missing
+                        .iter()
+                        .map(|s| format!("`wrangler secret put {s}{flag}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "))
                 };
                 check(&format!("secrets ({env})"), result);
             }
@@ -216,7 +248,8 @@ pub fn routes() -> Router<Ctx> {
 }
 "#;
         let found = routes_in("src/c.rs", src);
-        let brief: Vec<(String, &str, &str)> = found.iter().map(|r| (r.methods.join(","), r.path.as_str(), r.at.as_str())).collect();
+        let brief: Vec<(String, &str, &str)> =
+            found.iter().map(|r| (r.methods.join(","), r.path.as_str(), r.at.as_str())).collect();
         assert_eq!(
             brief,
             [
@@ -231,7 +264,10 @@ pub fn routes() -> Router<Ctx> {
 
     #[test]
     fn reads_dev_vars_and_missing_secrets() {
-        assert_eq!(dev_vars("# local only\nSESSION_SECRET=abc=def\n\n  API_TOKEN = x\n#OLD=1\n"), ["SESSION_SECRET", "API_TOKEN"]);
+        assert_eq!(
+            dev_vars("# local only\nSESSION_SECRET=abc=def\n\n  API_TOKEN = x\n#OLD=1\n"),
+            ["SESSION_SECRET", "API_TOKEN"]
+        );
         let required = ["SESSION_SECRET".to_owned(), "STRIPE_KEY".to_owned()];
         assert_eq!(missing_secrets(&required, r#"[{"name":"SESSION_SECRET","type":"secret_text"}]"#), ["STRIPE_KEY"]);
         assert!(missing_secrets(&[], "[]").is_empty());

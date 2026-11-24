@@ -7,12 +7,13 @@ use axum::{
     Json,
     extract::{FromRequest, FromRequestParts, Query, Request},
     http::{
-        HeaderName, HeaderValue, Method, StatusCode, request::Parts,
+        HeaderName, HeaderValue, Method, StatusCode,
         header::{
             ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
             ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS,
             ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, REFERRER_POLICY, VARY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
         },
+        request::Parts,
     },
     middleware::Next,
     response::{IntoResponse, Response},
@@ -87,7 +88,8 @@ impl<S: Send + Sync, T: DeserializeOwned + Validate> FromRequest<S> for Valid<T>
     type Rejection = Error;
 
     async fn from_request(req: Request, state: &S) -> Result<Self> {
-        let Json(value) = Json::<T>::from_request(req, state).await.map_err(|e| Error::new(e.status(), e.body_text()))?;
+        let Json(value) =
+            Json::<T>::from_request(req, state).await.map_err(|e| Error::new(e.status(), e.body_text()))?;
         let mut errors = Errors::new();
         value.validate(&mut errors);
         errors.finish()?;
@@ -157,7 +159,8 @@ impl<S: Send + Sync> FromRequestParts<S> for Page {
     type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self> {
-        let Query(page) = Query::<Page>::from_request_parts(parts, state).await.map_err(|e| Error::bad_request(e.body_text()))?;
+        let Query(page) =
+            Query::<Page>::from_request_parts(parts, state).await.map_err(|e| Error::bad_request(e.body_text()))?;
         Ok(page)
     }
 }
@@ -215,7 +218,10 @@ impl Cors {
             out.push((ACCESS_CONTROL_ALLOW_CREDENTIALS, "true".to_owned()));
         }
         if let Some(requested) = preflight {
-            out.push((ACCESS_CONTROL_ALLOW_METHODS, self.methods.as_ref().map_or(CORS_METHODS.to_owned(), |m| m.join(", "))));
+            out.push((
+                ACCESS_CONTROL_ALLOW_METHODS,
+                self.methods.as_ref().map_or(CORS_METHODS.to_owned(), |m| m.join(", ")),
+            ));
             // Without a list, any header the browser asks for is allowed.
             if let Some(headers) = self.headers.as_ref().map(|h| h.join(", ")).or(requested.map(str::to_owned)) {
                 out.push((ACCESS_CONTROL_ALLOW_HEADERS, headers));
@@ -274,7 +280,10 @@ pub(crate) async fn guard<H: Hooks>(req: Request, next: Next) -> Response {
     {
         let status = res.status();
         // A 5xx that isn't a `doko::Error` (a handler returning a bare status) is reported too.
-        let error = res.extensions_mut().remove::<Error>().unwrap_or_else(|| Error::new(status, "the handler answered with this status"));
+        let error = res
+            .extensions_mut()
+            .remove::<Error>()
+            .unwrap_or_else(|| Error::new(status, "the handler answered with this status"));
         // After the response: reporting must not slow down or break the error page.
         ctx.wait_until(H::on_error(ctx.clone(), error));
     }
@@ -286,7 +295,13 @@ mod tests {
     use super::*;
 
     fn cors(origins: &[&str], credentials: bool) -> Cors {
-        Cors { origins: origins.iter().map(|o| o.to_string()).collect(), methods: None, headers: None, credentials, max_age_secs: Some(600) }
+        Cors {
+            origins: origins.iter().map(|o| o.to_string()).collect(),
+            methods: None,
+            headers: None,
+            credentials,
+            max_age_secs: Some(600),
+        }
     }
 
     fn get<'a>(headers: &'a [(HeaderName, String)], name: &HeaderName) -> Option<&'a str> {
@@ -301,7 +316,10 @@ mod tests {
         assert_eq!(get(&h, &ACCESS_CONTROL_ALLOW_ORIGIN), Some("https://app.example"));
         assert_eq!(get(&h, &ACCESS_CONTROL_ALLOW_CREDENTIALS), Some("true"));
         assert_eq!(get(&h, &ACCESS_CONTROL_ALLOW_METHODS), None, "only on preflights");
-        assert_eq!(get(&cors(&["*"], false).headers("https://x.example", None), &ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
+        assert_eq!(
+            get(&cors(&["*"], false).headers("https://x.example", None), &ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some("*")
+        );
     }
 
     #[test]
@@ -312,7 +330,10 @@ mod tests {
         assert_eq!(get(&h, &ACCESS_CONTROL_MAX_AGE), Some("600"));
         let mut listed = cors(&["*"], false);
         listed.headers = Some(vec!["content-type".into()]);
-        assert_eq!(get(&listed.headers("https://x.example", Some(Some("x-api-key"))), &ACCESS_CONTROL_ALLOW_HEADERS), Some("content-type"));
+        assert_eq!(
+            get(&listed.headers("https://x.example", Some(Some("x-api-key"))), &ACCESS_CONTROL_ALLOW_HEADERS),
+            Some("content-type")
+        );
     }
 
     #[test]
