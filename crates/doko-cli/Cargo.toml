@@ -1,7 +1,8 @@
 [package]
 name = "doko-cli"
 description = "CLI for the doko framework"
-version.workspace = true
+# Released on its own: 0.1.1 fixes the `doko new` template of 0.1.0.
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

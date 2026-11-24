@@ -170,7 +170,8 @@ pub fn app(root: &Path, name: &str) -> Result<Vec<String>, String> {
 }
 
 const COMPAT_DATE: &str = "2026-11-01";
-const DOKO_GIT: &str = "https://github.com/wheregmis/doko";
+/// The published library is `doko-rs`; apps still import it as `doko`.
+const DOKO_VERSION: &str = "0.1";
 
 fn app_cargo_toml(name: &str) -> String {
     format!(
@@ -185,13 +186,13 @@ publish = false
 crate-type = [\"cdylib\"]
 
 [dependencies]
-doko = {{ package = \"doko-rs\", git = \"{DOKO_GIT}\" }}
+doko = {{ package = \"doko-rs\", version = \"{DOKO_VERSION}\" }}
 # required: worker's #[event] macro expands to ::worker paths
 worker = {{ version = \"0.9\", features = [\"http\", \"axum\", \"d1\", \"queue\"] }}
 serde = {{ version = \"1\", features = [\"derive\"] }}
 
 [dev-dependencies]
-doko = {{ package = \"doko-rs\", git = \"{DOKO_GIT}\", features = [\"test\"] }}
+doko = {{ package = \"doko-rs\", version = \"{DOKO_VERSION}\", features = [\"test\"] }}
 
 [profile.release]
 lto = true
