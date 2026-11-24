@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/doko.svg" width="128" height="128" alt="doko logo: a woven bamboo basket carried by one strap">
+  <img src="https://raw.githubusercontent.com/wheregmis/doko/master/assets/doko.svg" width="128" height="128" alt="doko logo: a woven bamboo basket carried by one strap">
 </p>
 
 <h1 align="center">doko</h1>
@@ -28,17 +28,23 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Generators](#generators) | `doko new`, `generate controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
-doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](ROADMAP.md) for the roadmap.
+doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](https://github.com/wheregmis/doko/blob/master/ROADMAP.md) for the roadmap.
 
 ## Quick start
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install --path crates/doko-cli
-cd examples/hello && doko dev
+cargo install doko-cli
+doko new my-app && cd my-app && doko dev
 ```
 
-Or start a new app with `doko new my-app && cd my-app && doko dev`.
+The library is published as `doko-rs` (the name `doko` was taken) and imported as `doko`; `doko new` writes the dependency for you:
+
+```toml
+doko = { package = "doko-rs", version = "0.1" }
+```
+
+To run the example from a checkout instead: `cargo install --path crates/doko-cli && cd examples/hello && doko dev`.
 
 `doko dev` / `doko deploy` regenerate `wrangler.toml` from `doko.toml`, then run wrangler. `doko config` only regenerates. Extra args go to wrangler.
 
@@ -300,7 +306,7 @@ async fn join(ctx: Ctx, Path(room): Path<String>, req: Request) -> Result<Respon
 }
 ```
 
-The object may have slept since the last message, so keep per-socket state in storage or in `ws.serialize_attachment(..)`, not in fields. See [examples/hello/src/controllers/rooms.rs](examples/hello/src/controllers/rooms.rs).
+The object may have slept since the last message, so keep per-socket state in storage or in `ws.serialize_attachment(..)`, not in fields. See [examples/hello/src/controllers/rooms.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/src/controllers/rooms.rs).
 
 ### Rate limits
 
@@ -384,7 +390,7 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 - **JWKS.** With `jwks_url`, RS256 tokens are checked against the key their `kid` names. The key set is kept in memory for an hour; an unknown `kid` refetches it, at most once a minute, so rotated keys are picked up without a deploy. Set `jwt_issuer` too, or any tenant of a shared identity provider can mint tokens you accept.
 - **Roles.** `.require_role("admin")` is `.require_auth()` plus a 403 unless the session value or the JWT claims carry the role, as `"role": "admin"` or `"roles": ["admin", ..]`. What roles exist and who has them is up to the app.
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
-- **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](examples/hello/src/controllers/auth.rs).
+- **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/src/controllers/auth.rs).
 
 ## Email
 
@@ -452,4 +458,4 @@ fn creates_notes() {
 
 `app.send(method, path, headers, body)` sends any request, and `res.header("set-cookie")` reads a response header.
 
-Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).
+Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. See [examples/hello/tests/app.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/tests/app.rs).

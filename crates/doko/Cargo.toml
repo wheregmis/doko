@@ -1,5 +1,6 @@
 [package]
-name = "doko"
+# `doko` is taken on crates.io. The library is still called `doko`, so code says `use doko::..`.
+name = "doko-rs"
 description = "A batteries-included framework for Cloudflare Workers"
 version.workspace = true
 edition.workspace = true
@@ -8,6 +9,9 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[lib]
+name = "doko"
 
 [dependencies]
 worker.workspace = true

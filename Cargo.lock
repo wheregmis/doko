@@ -131,8 +131,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "doko"
-version = "0.1.0"
+name = "doko-cli"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "doko-rs"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -143,14 +151,6 @@ dependencies = [
  "tower-service",
  "ureq",
  "worker",
-]
-
-[[package]]
-name = "doko-cli"
-version = "0.1.0"
-dependencies = [
- "serde",
- "toml",
 ]
 
 [[package]]
@@ -263,9 +263,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "doko",
+ "doko-rs",
  "serde",
  "serde_json",
  "worker",
