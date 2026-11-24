@@ -30,3 +30,16 @@ fn notes_and_jobs() {
 
     assert_eq!(app.get("/notes/999999").status, 404);
 }
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn rate_limits() {
+    let app = doko::test::App::start(&[]);
+    for _ in 0..3 {
+        assert_eq!(app.get("/limited").status, 200);
+    }
+    let res = app.get("/limited");
+    assert_eq!(res.status, 429, "{}", res.body);
+    assert_eq!(res.json::<Value>(), json!({ "error": "too many requests" }));
+    assert_eq!(app.get("/health").status, 200, "other routes are not limited");
+}

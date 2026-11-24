@@ -163,17 +163,25 @@ impl Policy {
     }
 }
 
-/// Adds `.cache(policy)` to routers.
+/// Adds `.cache(policy)` and `.rate_limit(limit)` to routers.
 pub trait RouterExt {
     /// Caches successful GET responses of the routes added so far. Requests with `Authorization`,
     /// and responses that are not 200, set cookies, are `private`/`no-store`, or stream, are never cached.
     /// Responses carry `x-doko-cache: HIT | STALE | MISS | BYPASS`.
     fn cache(self, policy: Policy) -> Self;
+
+    /// Limits requests per client IP to the routes added so far, counted together. Over the limit,
+    /// they get a 429 with `retry-after`. If the limiter itself fails, they get a 500.
+    fn rate_limit(self, limit: crate::RateLimit) -> Self;
 }
 
 impl RouterExt for Router<Ctx> {
     fn cache(self, policy: Policy) -> Self {
         self.route_layer(middleware::from_fn(move |req: Request, next: Next| respond(policy.clone(), req, next)))
+    }
+
+    fn rate_limit(self, limit: crate::RateLimit) -> Self {
+        self.route_layer(middleware::from_fn(move |req: Request, next: Next| crate::durable::limit(limit, req, next)))
     }
 }
 

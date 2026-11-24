@@ -1,6 +1,9 @@
 //! `doko.toml` → `wrangler.toml` + `src/bindings.rs`.
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
@@ -77,6 +80,27 @@ struct Bindings {
     d1: BTreeMap<String, D1>,
     #[serde(default)]
     queues: BTreeMap<String, Queue>,
+    #[serde(default, rename = "do")]
+    durable: BTreeMap<String, Do>,
+}
+
+/// A Durable Object class exported by this worker with `doko::app!(App, objects: [Class])`.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Do {
+    class_name: String,
+}
+
+#[derive(Serialize)]
+struct DurableObjects {
+    bindings: Vec<DoBinding>,
+}
+
+// Wrangler names this field `name`, not `binding` like the other resources.
+#[derive(Serialize)]
+struct DoBinding {
+    name: String,
+    class_name: String,
 }
 
 /// `id` is optional: wrangler simulates locally, and provisions on deploy.
@@ -141,6 +165,9 @@ struct Wrangler<'a> {
     main: &'a str,
     compatibility_date: &'a str,
     build: Build<'a>,
+    /// Durable Object class history. Top level only: wrangler envs inherit it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    migrations: Vec<Table>,
     #[serde(flatten)]
     resources: Resources,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -171,6 +198,8 @@ struct Resources {
     d1_databases: Vec<Bound<D1>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     queues: Option<Queues>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_objects: Option<DurableObjects>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +228,12 @@ pub struct Output {
 }
 
 pub fn render(doko_toml: &str) -> Result<Output, String> {
+    render_over(doko_toml, "")
+}
+
+/// Like [`render`], keeping the Durable Object migrations already in `previous_wrangler_toml`:
+/// wrangler applies migrations by tag, in order, so history is only ever appended to.
+pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Output, String> {
     let cfg: DokoToml = toml::from_str(doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
     if !is_valid_app_name(&cfg.app.name) {
         return Err(format!(
@@ -234,6 +269,7 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
             b.kv.extend(e.bindings.kv.clone());
             b.r2.extend(e.bindings.r2.clone());
             b.d1.extend(e.bindings.d1.clone());
+            b.durable.extend(e.bindings.durable.clone());
         }
         let at = if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") };
         check_binding_names(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
@@ -246,6 +282,9 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
             producers: b.queues.iter().map(|(k, q)| Producer { binding: k.clone(), queue: q.queue.clone() }).collect(),
             consumers: b.queues.values().cloned().collect(),
         });
+        let durable_objects = (!b.durable.is_empty()).then(|| DurableObjects {
+            bindings: b.durable.iter().map(|(k, d)| DoBinding { name: k.clone(), class_name: d.class_name.clone() }).collect(),
+        });
         let r = Resources {
             triggers: Triggers { crons },
             vars: Vars { DOKO_ENV: env.to_owned(), DOKO_CONFIG: config, DOKO_TASKS: tasks },
@@ -253,11 +292,14 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
             r2_buckets: bound(&b.r2),
             d1_databases: bound(&b.d1),
             queues,
+            durable_objects,
         };
         Ok((r, b))
     };
 
     let (resources, mut all) = resources_for(DEFAULT_ENV)?;
+    // Every class in any env: migrations are shared, and an env override may bind a different class.
+    let mut classes: BTreeSet<String> = all.durable.values().map(|d| d.class_name.clone()).collect();
     let mut d1_by_env = BTreeMap::new();
     d1_by_env.insert(DEFAULT_ENV.to_owned(), all.d1.keys().cloned().collect());
     let mut env = BTreeMap::new();
@@ -268,16 +310,20 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
         all.kv.extend(b.kv);
         all.r2.extend(b.r2);
         all.d1.extend(b.d1);
+        all.durable.extend(b.durable.clone());
         all.queues.extend(b.queues);
+        classes.extend(b.durable.into_values().map(|d| d.class_name));
         env.insert(name.as_str(), r);
     }
     check_binding_names(&all).map_err(|e| format!("doko.toml: {e}"))?;
+    let migrations = migrations(previous_wrangler_toml, &classes)?;
     let app = &cfg.app;
     let wrangler = Wrangler {
         name: &app.name,
         main: "build/index.js",
         compatibility_date: &app.compatibility_date,
         build: Build { command: BUILD_COMMAND },
+        migrations,
         resources,
         env,
     };
@@ -288,6 +334,53 @@ pub fn render(doko_toml: &str) -> Result<Output, String> {
         d1: all.d1.into_keys().collect(),
         d1_by_env,
     })
+}
+
+#[derive(Deserialize)]
+struct Previous {
+    #[serde(default)]
+    migrations: Vec<Table>,
+}
+
+/// The previous migrations, plus one creating the declared classes that don't exist yet.
+fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>) -> Result<Vec<Table>, String> {
+    let mut migrations = toml::from_str::<Previous>(previous_wrangler_toml)
+        .map_err(|e| format!("wrangler.toml: reading existing Durable Object migrations: {e}"))?
+        .migrations;
+    let names = |m: &Table, key: &str| -> Vec<String> {
+        m.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect()
+    };
+    let mut live = BTreeSet::new();
+    for m in &migrations {
+        live.extend(names(m, "new_sqlite_classes"));
+        live.extend(names(m, "new_classes"));
+        for (from, to) in m.get("renamed_classes").and_then(Value::as_array).into_iter().flatten().filter_map(|r| {
+            Some((r.get("from")?.as_str()?.to_owned(), r.get("to")?.as_str()?.to_owned()))
+        }) {
+            live.remove(&from);
+            live.insert(to);
+        }
+        for class in names(m, "deleted_classes") {
+            live.remove(&class);
+        }
+    }
+    // Deleting a class destroys everything its objects stored, so doko never writes that migration itself.
+    if let Some(gone) = live.difference(classes).next() {
+        return Err(format!(
+            "doko.toml: Durable Object class `{gone}` has a migration in wrangler.toml but no [do.<NAME>] entry. \
+             Restore the entry, or, to delete the class AND ITS STORED DATA on the next deploy, append this to wrangler.toml:\n\n\
+             [[migrations]]\ntag = \"v{}\"\ndeleted_classes = [\"{gone}\"]\n",
+            migrations.len() + 1
+        ));
+    }
+    let new: Vec<Value> = classes.difference(&live).cloned().map(Value::String).collect();
+    if !new.is_empty() {
+        let mut m = Table::new();
+        m.insert("tag".into(), Value::String(format!("v{}", migrations.len() + 1)));
+        m.insert("new_sqlite_classes".into(), Value::Array(new));
+        migrations.push(m);
+    }
+    Ok(migrations)
 }
 
 fn bound<T: Clone>(m: &BTreeMap<String, T>) -> Vec<Bound<T>> {
@@ -320,7 +413,14 @@ fn check_resources(b: &Bindings) -> Result<(), String> {
             return Err(format!("d1 `{binding}`: `database_name` must not be empty"));
         }
     }
-    let mut seen_queues = std::collections::BTreeSet::new();
+    for (binding, d) in &b.durable {
+        let c = &d.class_name;
+        // The class is a Rust type name passed to `doko::app!`.
+        if !c.starts_with(|ch: char| ch.is_ascii_uppercase()) || !c.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+            return Err(format!("do `{binding}`: `class_name` must be a Rust type name like `Counter` (got `{c}`)"));
+        }
+    }
+    let mut seen_queues = BTreeSet::new();
     for (binding, q) in &b.queues {
         if q.queue.trim().is_empty() {
             return Err(format!("queue `{binding}`: `queue` must not be empty"));
@@ -336,8 +436,8 @@ fn check_resources(b: &Bindings) -> Result<(), String> {
 }
 
 fn check_binding_names(b: &Bindings) -> Result<(), String> {
-    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys());
-    let mut seen = std::collections::BTreeSet::new();
+    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys()).chain(b.durable.keys());
+    let mut seen = BTreeSet::new();
     for name in names {
         let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
             && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
@@ -355,15 +455,16 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
 }
 
 fn bindings_rs(b: &Bindings) -> Option<String> {
-    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() {
+    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty() {
         return None;
     }
     let mut s = format!("{BINDINGS_HEADER}\n");
-    let kinds: [(&str, Vec<&String>); 4] = [
+    let kinds: [(&str, Vec<&String>); 5] = [
         ("Kv", b.kv.keys().collect()),
         ("R2", b.r2.keys().collect()),
         ("D1", b.d1.keys().collect()),
         ("Queue", b.queues.keys().collect()),
+        ("Do", b.durable.keys().collect()),
     ];
     for (kind, names) in kinds {
         for name in names {
@@ -453,6 +554,40 @@ mod tests {
         assert_eq!(v["env"]["prod"]["queues"]["consumers"][0]["queue"].as_str(), Some("jobs-prod"));
         assert!(o.bindings_rs.unwrap().contains("pub const JOBS: doko::QueueBinding"));
         assert!(err("[queues.JOBS]\nqueue = \"j\"\nretries = 1\n").contains("retries"));
+    }
+
+    #[test]
+    fn renders_durable_objects_and_appends_migrations() {
+        const DO: &str = "[do.COUNTER]\nclass_name = \"Counter\"\n[env.prod]\n";
+        let o = out(DO);
+        let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
+        assert_eq!(v["durable_objects"]["bindings"][0]["name"].as_str(), Some("COUNTER"));
+        assert_eq!(v["env"]["prod"]["durable_objects"]["bindings"][0]["class_name"].as_str(), Some("Counter"));
+        assert!(v["env"]["prod"].get("migrations").is_none(), "envs inherit migrations");
+        let m = v["migrations"].as_array().unwrap();
+        assert_eq!((m.len(), m[0]["tag"].as_str()), (1, Some("v1")));
+        assert_eq!(m[0]["new_sqlite_classes"][0].as_str(), Some("Counter"));
+        assert!(o.bindings_rs.unwrap().contains("pub const COUNTER: doko::DoBinding"));
+
+        // Unchanged classes: history is kept as is. A new class (here only in prod) appends v2.
+        let again = render_over(&format!("{APP}{DO}"), &o.wrangler_toml).unwrap();
+        assert_eq!(again.wrangler_toml, o.wrangler_toml);
+        let more = format!("{APP}{DO}[env.prod.do.ROOM]\nclass_name = \"Room\"\n");
+        let v2: Table = toml::from_str(&render_over(&more, &o.wrangler_toml).unwrap().wrangler_toml).unwrap();
+        let m = v2["migrations"].as_array().unwrap();
+        assert_eq!((m.len(), m[1]["tag"].as_str()), (2, Some("v2")));
+        assert_eq!(m[0]["new_sqlite_classes"].as_array().unwrap().len(), 1);
+        assert_eq!(m[1]["new_sqlite_classes"][0].as_str(), Some("Room"));
+
+        // Removing a class is refused until its deletion is written by hand; then it can come back.
+        let e = render_over(APP, &o.wrangler_toml).err().unwrap();
+        assert!(e.contains("deleted_classes = [\"Counter\"]") && e.contains("tag = \"v2\""), "{e}");
+        let deleted = format!("{}\n[[migrations]]\ntag = \"v2\"\ndeleted_classes = [\"Counter\"]\n", o.wrangler_toml);
+        assert!(!render_over(APP, &deleted).unwrap().wrangler_toml.contains("durable_objects"));
+        let back: Table = toml::from_str(&render_over(&format!("{APP}{DO}"), &deleted).unwrap().wrangler_toml).unwrap();
+        assert_eq!(back["migrations"][2]["new_sqlite_classes"][0].as_str(), Some("Counter"));
+        assert!(err("[do.C]\nclass_name = \"my-class\"\n").contains("Rust type name"));
+        assert!(render_over(APP, "not toml =").is_err());
     }
 
     #[test]

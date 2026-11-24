@@ -20,16 +20,11 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 3. Cache | `get_or_set`, `.cache(Policy::...)` on routes, stale-while-revalidate, tag purges | No `Vary`; no KV second tier |
 | 4. Background work | `Job` trait + `enqueue`, queue dispatch by `NAME`, retries/DLQ, named cron `Tasks` | Batches run one message at a time; queue is always produced and consumed by the same worker |
 | 5. DX | `doko new`, `generate job\|migration\|controller`, `doko::test::App`, `doko deploy --env` | Depends on doko by git; tests need Node and `--ignored` |
+| 6. Durable Objects | `[do.NAME]` with generated bindings and append-only class migrations, `DurableObject` trait exported by `doko::app!(App, objects: [..])`, `ctx.durable(NAME)?.get(name)?.fetch(req)`, `RateLimiter` + `.rate_limit(RateLimit::new(..))` | Stubs speak `fetch` only (no RPC helper); no WebSocket handlers; limits key on client IP only; class deletions and renames are hand-written migrations |
 
 ## Next
 
 Each phase ends with the `hello` example using the feature and an integration test through `doko::test::App`.
-
-### Phase 6: Durable Objects
-- `[do.NAME]` in `doko.toml`, generating the binding and the `wrangler.toml` class + migration entries.
-- A `DurableObject` trait the user implements, exported by `doko::app!`; `ctx.durable("NAME").get(id)` returns a typed stub with a `Send` fetch.
-- Built on top: `RateLimit` tower layer (fixed-window counter per key in a DO), configurable per route like `.cache(...)`.
-- **Milestone:** a rate-limited route in `hello` returning 429 past its limit.
 
 ### Phase 7: auth
 - Sessions: signed cookie holding a session id, store backed by KV (default) or a DO for strong consistency; `Session` extractor.
@@ -61,6 +56,7 @@ Limits from the shipped phases, picked up when a user needs them:
 - Streaming R2 uploads and a multipart helper.
 - `Vary` support in the response cache.
 - Concurrent processing of queue batches.
+- Rate limit keys other than client IP (per user, once auth lands), and WebSocket handlers on Durable Objects.
 - A proc-macro crate, only if a feature can't be done with `macro_rules!` and traits.
 
 ## Risks
