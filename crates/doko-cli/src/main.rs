@@ -18,6 +18,7 @@ usage:
   doko migrate [wrangler args]        apply D1 migrations to every D1 binding (local unless --remote)
   doko generate controller <name>     scaffold src/controllers/<name>.rs (alias: g)
   doko generate job <name>            scaffold src/jobs/<name>.rs
+  doko generate mailer <name>         scaffold src/mailers/<name>.rs
   doko generate migration <name> [DB] new D1 migration file (DB needed with several D1 bindings)";
 const WRANGLER: &str = "wrangler@4";
 const BINDINGS_RS: &str = "src/bindings.rs";
@@ -121,6 +122,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("wrote {path}");
             }
             println!("make sure your app has `mod jobs;`, returns `jobs::jobs()` from Hooks::jobs, and has a [queues.<NAME>] in doko.toml");
+            Ok(())
+        }
+        ["generate" | "g", "mailer", name] => {
+            for path in generate::mailer(Path::new("."), name)? {
+                println!("wrote {path}");
+            }
+            println!("make sure your app has `mod mailers;` and an [email.<NAME>] in doko.toml");
             Ok(())
         }
         ["generate" | "g", "migration", name, db @ ..] => {

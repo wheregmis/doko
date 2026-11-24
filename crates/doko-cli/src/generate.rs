@@ -38,6 +38,18 @@ pub fn jobs() -> Jobs {
 }
 ";
 
+const MAILERS_MOD: &str = "\
+//! Mailers. `doko generate mailer <name>` adds to this file; keep the doko: marker.
+
+// doko:modules
+";
+
+/// Writes `src/mailers/<name>.rs` and declares it in `src/mailers/mod.rs`.
+pub fn mailer(root: &Path, name: &str) -> Result<Vec<String>, String> {
+    check_snake("mailer", name)?;
+    add_module(root, "mailers", MAILERS_MOD, name, &mailer_template(name), "", "")
+}
+
 /// Writes `src/controllers/<name>.rs` and registers it in `src/controllers/mod.rs`.
 /// Returns the paths it created or changed.
 pub fn controller(root: &Path, name: &str) -> Result<Vec<String>, String> {
@@ -69,6 +81,7 @@ fn camel(name: &str) -> String {
 }
 
 /// Writes `src/<dir>/<name>.rs` and adds `pub mod <name>;` plus `item` before `item_marker` in its mod.rs.
+/// An empty `item_marker` means the module has nothing else to register.
 fn add_module(
     root: &Path,
     dir_name: &str,
@@ -101,9 +114,10 @@ fn add_module(
             mod_rs.display()
         ));
     }
-    let updated = current
-        .replacen(MODULES_MARKER, &format!("pub mod {name};\n{MODULES_MARKER}"), 1)
-        .replacen(item_marker, &format!("{item}\n    {item_marker}"), 1);
+    let mut updated = current.replacen(MODULES_MARKER, &format!("pub mod {name};\n{MODULES_MARKER}"), 1);
+    if !item_marker.is_empty() {
+        updated = updated.replacen(item_marker, &format!("{item}\n    {item_marker}"), 1);
+    }
 
     fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     fs::write(&file, body).map_err(|e| format!("writing {}: {e}", file.display()))?;
@@ -221,6 +235,28 @@ fn health() {
 }
 ";
 
+fn mailer_template(name: &str) -> String {
+    let subject = name.replace('_', " ");
+    format!(
+        "\
+use doko::Message;
+
+/// Send with `ctx.mail(EMAIL)?.send(&{name}::message(to)).await?`.
+pub fn message(to: &str) -> Message {{
+    Message {{
+        // Must be on a domain onboarded to Email Sending.
+        from: \"hello@example.com\".into(),
+        to: vec![to.into()],
+        subject: \"{subject}\".into(),
+        text: Some(\"Hello!\\n\".into()),
+        // Add `html` too for richer mail, escaping anything a user typed.
+        ..Default::default()
+    }}
+}}
+"
+    )
+}
+
 fn job_template(name: &str, ty: &str) -> String {
     format!(
         "\
@@ -313,6 +349,18 @@ mod tests {
         assert!(j.contains("impl Job for SendWelcome") && j.contains("\"send_welcome\""), "{j}");
         fs::write(root.0.join("src/jobs.rs"), "").unwrap();
         assert!(job(&root.0, "other").unwrap_err().contains("src/jobs.rs"));
+    }
+
+    #[test]
+    fn generates_and_declares_mailers() {
+        let root = tmp("mailer");
+        mailer(&root.0, "welcome").unwrap();
+        mailer(&root.0, "password_reset").unwrap();
+        let m = fs::read_to_string(root.0.join("src/mailers/mod.rs")).unwrap();
+        assert!(m.ends_with("pub mod welcome;\npub mod password_reset;\n// doko:modules\n"), "{m}");
+        let w = fs::read_to_string(root.0.join("src/mailers/password_reset.rs")).unwrap();
+        assert!(w.contains("subject: \"password reset\".into()") && w.contains("text: Some(\"Hello!\\n\".into())"), "{w}");
+        assert!(mailer(&root.0, "welcome").unwrap_err().contains("already exists"));
     }
 
     #[test]

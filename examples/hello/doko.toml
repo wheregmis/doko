@@ -5,6 +5,7 @@ compatibility_date = "2026-11-01"
 # Read at runtime with ctx.config::<Config>(). [env.<name>.config] is deep-merged over it.
 [config]
 greeting = "hello from doko"
+contact_to = "owner@example.com"
 
 [env.prod.config]
 greeting = "hello from doko (prod)"
@@ -33,6 +34,9 @@ database_name = "doko-hello"
 # A Durable Object class, exported in src/lib.rs with doko::app!(App, objects: [RateLimiter]).
 [do.RATE_LIMITER]
 class_name = "RateLimiter"
+
+# Sends mail: ctx.mail(EMAIL). Under `doko dev` mail is logged instead of sent.
+[email.EMAIL]
 
 # A queue this worker sends jobs to and consumes (Hooks::jobs). Fields match wrangler's consumer settings.
 [queues.JOBS]

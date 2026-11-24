@@ -6,6 +6,7 @@ pub mod posts;
 pub mod notes;
 pub mod files;
 pub mod auth;
+pub mod contact;
 // doko:modules
 
 pub fn routes() -> Router<Ctx> {
@@ -14,5 +15,6 @@ pub fn routes() -> Router<Ctx> {
     .merge(notes::routes())
     .merge(files::routes())
     .merge(auth::routes())
+    .merge(contact::routes())
     // doko:routes
 }

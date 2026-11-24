@@ -55,6 +55,10 @@ binding!(
     /// A `[do.NAME]` Durable Object binding from doko.toml.
     DoBinding
 );
+binding!(
+    /// An `[email.NAME]` sending binding from doko.toml.
+    EmailBinding
+);
 
 pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
     move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))

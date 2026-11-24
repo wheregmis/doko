@@ -20,6 +20,7 @@ mod durable;
 mod error;
 mod jobs;
 mod log;
+mod mail;
 mod storage;
 #[cfg(feature = "test")]
 pub mod test;
@@ -31,7 +32,8 @@ pub use durable::{object_alarm, serve_object};
 pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub};
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
-pub use storage::{Bucket, D1Binding, Db, DoBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
+pub use mail::{EmailBody, InboundEmail, Mailer, Message};
+pub use storage::{Bucket, D1Binding, Db, DoBinding, EmailBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
 pub use worker;
 
 use std::{convert::Infallible, sync::Arc};
@@ -113,6 +115,11 @@ impl Ctx {
         Ok(Durable(SendWrapper::new(self.env.durable_object(binding.0).map_err(storage::missing(binding.0))?)))
     }
 
+    /// An email sending binding: `ctx.mail(bindings::EMAIL)?.send(&message).await?`.
+    pub fn mail(&self, binding: EmailBinding) -> Result<Mailer> {
+        Ok(Mailer(SendWrapper::new(self.env.send_email(binding.0).map_err(storage::missing(binding.0))?)))
+    }
+
     /// The edge cache (Cache API) for JSON values. For whole responses, see [`RouterExt::cache`].
     pub fn cache(&self) -> Cache {
         Cache::new(self.clone())
@@ -148,6 +155,13 @@ pub trait Hooks: 'static {
     /// Cron tasks by name; schedules come from doko.toml's `[tasks]`: `Tasks::new().add("cleanup", cleanup)`.
     fn tasks() -> Tasks {
         Tasks::new()
+    }
+
+    /// Handles an email that Email Routing delivered to this worker. An `Err` fails the delivery,
+    /// so the sending server retries or bounces it. Without an override, mail is rejected.
+    fn on_email(_ctx: Ctx, email: InboundEmail) -> impl Future<Output = Result<()>> {
+        email.reject("this address does not accept mail");
+        async { Ok(()) }
     }
 }
 
@@ -193,6 +207,23 @@ pub async fn dispatch_queue(
 }
 
 #[doc(hidden)]
+pub async fn dispatch_email<H: Hooks>(
+    message: worker::ForwardableEmailMessage,
+    env: Env,
+    exec: Context,
+) -> worker::Result<()> {
+    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
+    let (from, to) = (message.from(), message.to());
+    let result = H::on_email(ctx, InboundEmail(SendWrapper::new(message))).await;
+    let error = result.as_ref().err().map(|e| e.message().to_owned());
+    worker::console_log!(
+        "{}",
+        serde_json::json!({ "level": if error.is_some() { "error" } else { "info" }, "email": { "from": from, "to": to }, "error": error })
+    );
+    result.map_err(|e| worker::Error::RustError(e.to_string()))
+}
+
+#[doc(hidden)]
 pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worker::Result<Response<Body>> {
     dispatch_fetch(build_router::<H>(), req, env, exec).await
 }
@@ -211,7 +242,7 @@ pub async fn queue<H: Hooks>(batch: jobs::QueueBatch, env: Env, exec: Context) -
 #[doc(hidden)]
 pub use jobs::QueueBatch;
 
-/// Wires a [`Hooks`] type to the Workers fetch, scheduled and queue events.
+/// Wires a [`Hooks`] type to the Workers fetch, scheduled, queue and email events.
 ///
 /// `doko::app!(App, objects: [Counter, RateLimiter])` also exports those [`DurableObject`] types
 /// as classes. Each must be in scope by that name, which is its `class_name` in doko.toml.
@@ -278,6 +309,15 @@ macro_rules! app {
                 ctx,
             )
             .await
+        }
+
+        #[::worker::event(email)]
+        async fn __doko_email(
+            message: ::worker::ForwardableEmailMessage,
+            env: ::worker::Env,
+            ctx: ::worker::Context,
+        ) -> ::worker::Result<()> {
+            $crate::dispatch_email::<$app>(message, env, ctx).await
         }
 
         #[::worker::event(queue)]
