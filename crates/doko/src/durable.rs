@@ -57,12 +57,22 @@ pub trait DurableObject: 'static {
     /// Runs for each message on a socket opened with [`accept_websocket`]. The object may have
     /// been asleep since the last one, so keep per-socket state in storage or in the socket's
     /// attachment (`ws.serialize_attachment(..)`), not in fields.
-    fn websocket_message(&self, _ws: WebSocket, _message: WebSocketIncomingMessage) -> impl Future<Output = Result<()>> {
+    fn websocket_message(
+        &self,
+        _ws: WebSocket,
+        _message: WebSocketIncomingMessage,
+    ) -> impl Future<Output = Result<()>> {
         async { Ok(()) }
     }
 
     /// Runs when a client closes its socket.
-    fn websocket_close(&self, _ws: WebSocket, _code: usize, _reason: String, _was_clean: bool) -> impl Future<Output = Result<()>> {
+    fn websocket_close(
+        &self,
+        _ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _was_clean: bool,
+    ) -> impl Future<Output = Result<()>> {
         async { Ok(()) }
     }
 
@@ -170,12 +180,14 @@ impl Stub {
     /// ```
     pub async fn call<A: Serialize, R: DeserializeOwned>(&self, path: &str, args: &A) -> Result<R> {
         let uri = format!("https://doko.do/{}", path.trim_start_matches('/'));
-        let req = Request::post(uri).header(CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_vec(args)?))?;
+        let req =
+            Request::post(uri).header(CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_vec(args)?))?;
         let res = self.fetch(req).await?;
         let status = res.status();
         let body = to_bytes(res.into_body(), usize::MAX).await?;
         if !status.is_success() {
-            let message = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(str::to_owned));
+            let message =
+                serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(str::to_owned));
             return Err(Error::new(status, message.unwrap_or_else(|| format!("object answered {status}"))));
         }
         Ok(serde_json::from_slice(&body)?)
@@ -283,7 +295,9 @@ impl DurableObject for RateLimiter {
                 storage.put(WINDOW_KEY, window).await?;
                 Ok(StatusCode::OK.into_response())
             }
-            Err(retry_secs) => Ok((StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, retry_secs.to_string())]).into_response()),
+            Err(retry_secs) => {
+                Ok((StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, retry_secs.to_string())]).into_response())
+            }
         }
     }
 

@@ -12,7 +12,8 @@ keywords = ["cloudflare", "workers", "framework", "axum", "wasm"]
 categories = ["web-programming", "wasm"]
 
 [workspace.dependencies]
-doko = { path = "crates/doko", package = "doko-rs", version = "0.1.0" }
+# No `version`: only the unpublished example depends on it, and a release would have to bump it.
+doko = { path = "crates/doko", package = "doko-rs" }
 worker = { version = "0.9", features = ["http", "axum", "d1", "queue"] }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "macros"] }
 tower-service = "0.3"

@@ -60,14 +60,30 @@ pub fn mailer(root: &Path, name: &str) -> Result<Vec<String>, String> {
 /// Returns the paths it created or changed.
 pub fn controller(root: &Path, name: &str) -> Result<Vec<String>, String> {
     check_snake("controller", name)?;
-    add_module(root, "controllers", CONTROLLERS_MOD, name, &controller_template(name), ROUTES_MARKER, &format!(".merge({name}::routes())"))
+    add_module(
+        root,
+        "controllers",
+        CONTROLLERS_MOD,
+        name,
+        &controller_template(name),
+        ROUTES_MARKER,
+        &format!(".merge({name}::routes())"),
+    )
 }
 
 /// Writes `src/jobs/<name>.rs` and registers it in `src/jobs/mod.rs`.
 pub fn job(root: &Path, name: &str) -> Result<Vec<String>, String> {
     check_snake("job", name)?;
     let ty = camel(name);
-    add_module(root, "jobs", JOBS_MOD, name, &job_template(name, &ty), "// doko:jobs", &format!(".add::<{name}::{ty}>()"))
+    add_module(
+        root,
+        "jobs",
+        JOBS_MOD,
+        name,
+        &job_template(name, &ty),
+        "// doko:jobs",
+        &format!(".add::<{name}::{ty}>()"),
+    )
 }
 
 /// What a multi-file generator wrote, and what it could not do itself.
@@ -90,7 +106,9 @@ pub fn auth(root: &Path) -> Result<Generated, String> {
     let mut add = String::new();
     let db = first("d1").unwrap_or_else(|| {
         let app = table(&["app"]).and_then(|a| a.get("name")?.as_str()).unwrap_or("app");
-        add += &format!("\n# The accounts table lives here: migrations/*_create_users.sql.\n[d1.DB]\ndatabase_name = \"{app}\"\n");
+        add += &format!(
+            "\n# The accounts table lives here: migrations/*_create_users.sql.\n[d1.DB]\ndatabase_name = \"{app}\"\n"
+        );
         "DB".into()
     });
     let email = first("email").unwrap_or_else(|| {
@@ -116,7 +134,8 @@ pub fn auth(root: &Path) -> Result<Generated, String> {
         add += "\n# Where the links in mail point. Set it per env: [env.prod.wrangler.vars].\n[wrangler.vars]\nAPP_URL = \"http://localhost:8787\"\n";
     }
 
-    let migrations = root.join(table(&["d1", &db]).and_then(|d| d.get("migrations_dir")?.as_str()).unwrap_or("migrations"));
+    let migrations =
+        root.join(table(&["d1", &db]).and_then(|d| d.get("migrations_dir")?.as_str()).unwrap_or("migrations"));
     let existing: Vec<String> = fs::read_dir(&migrations)
         .map(|dir| dir.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
         .unwrap_or_default();
@@ -135,15 +154,27 @@ pub fn auth(root: &Path) -> Result<Generated, String> {
         }
     }
 
-    let fill = |template: &str| template.replace("__DB__", &db).replace("__EMAIL__", &email).replace("__RATE_LIMITER__", &limiter);
+    let fill = |template: &str| {
+        template.replace("__DB__", &db).replace("__EMAIL__", &email).replace("__RATE_LIMITER__", &limiter)
+    };
     let write = |path: &Path, body: &str| -> Result<String, String> {
-        fs::create_dir_all(path.parent().expect("a file path")).map_err(|e| format!("creating {}: {e}", path.display()))?;
+        fs::create_dir_all(path.parent().expect("a file path"))
+            .map_err(|e| format!("creating {}: {e}", path.display()))?;
         fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))?;
         Ok(path.display().to_string())
     };
     let controller = fill(include_str!("../templates/auth/controller.rs"));
-    let mut written = add_module(root, "controllers", CONTROLLERS_MOD, "auth", &controller, ROUTES_MARKER, ".merge(auth::routes())")?;
-    written.extend(add_module(root, "mailers", MAILERS_MOD, "auth", include_str!("../templates/auth/mailer.rs"), "", "")?);
+    let mut written =
+        add_module(root, "controllers", CONTROLLERS_MOD, "auth", &controller, ROUTES_MARKER, ".merge(auth::routes())")?;
+    written.extend(add_module(
+        root,
+        "mailers",
+        MAILERS_MOD,
+        "auth",
+        include_str!("../templates/auth/mailer.rs"),
+        "",
+        "",
+    )?);
     written.push(write(&migration, include_str!("../templates/auth/migration.sql"))?);
     written.push(write(&test, &fill(include_str!("../templates/auth/test.rs")))?);
     if !add.is_empty() {
@@ -190,7 +221,11 @@ fn add_mods(out: &mut String, modules: &[&str]) -> Vec<String> {
             continue;
         }
         // Before the first item, so inner doc comments stay at the top.
-        match out.lines().find(|l| l.starts_with("mod ") || l.starts_with("use ")).map(|l| l.as_ptr() as usize - out.as_ptr() as usize) {
+        match out
+            .lines()
+            .find(|l| l.starts_with("mod ") || l.starts_with("use "))
+            .map(|l| l.as_ptr() as usize - out.as_ptr() as usize)
+        {
             Some(at) => out.insert_str(at, &format!("mod {module};\n")),
             None => todo.push(format!("add `mod {module};` to src/lib.rs")),
         }
@@ -211,7 +246,8 @@ struct Field<'a> {
 }
 
 fn parse_field(spec: &str) -> Result<Field<'_>, String> {
-    let (name, kind) = spec.split_once(':').ok_or_else(|| format!("field `{spec}` must be name:type, e.g. `title:string`"))?;
+    let (name, kind) =
+        spec.split_once(':').ok_or_else(|| format!("field `{spec}` must be name:type, e.g. `title:string`"))?;
     check_snake("field", name)?;
     if ["id", "created_at", "updated_at"].contains(&name) {
         return Err(format!("field `{name}` is added to every scaffold already"));
@@ -261,16 +297,17 @@ pub fn scaffold(root: &Path, name: &str, specs: &[&str]) -> Result<Generated, St
     let doc: toml::Table = toml::from_str(&doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
     let d1 = doc.get("d1").and_then(|d| d.as_table());
     let db = d1.and_then(|t| t.keys().next().cloned());
-    let migrations = root.join(
-        db.as_ref().and_then(|db| d1?.get(db)?.get("migrations_dir")?.as_str()).unwrap_or("migrations"),
-    );
+    let migrations =
+        root.join(db.as_ref().and_then(|db| d1?.get(db)?.get("migrations_dir")?.as_str()).unwrap_or("migrations"));
     let existing: Vec<String> = fs::read_dir(&migrations)
         .map(|dir| dir.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
         .unwrap_or_default();
     let next = existing.iter().filter_map(|n| n.split('_').next()?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
     let migration = migrations.join(format!("{next:04}_create_{table}.sql"));
     let test = root.join(format!("tests/{table}.rs"));
-    for path in [root.join(format!("src/models/{name}.rs")), root.join(format!("src/controllers/{table}.rs")), test.clone()] {
+    for path in
+        [root.join(format!("src/models/{name}.rs")), root.join(format!("src/controllers/{table}.rs")), test.clone()]
+    {
         if path.exists() {
             return Err(format!("{} already exists", path.display()));
         }
@@ -280,12 +317,14 @@ pub fn scaffold(root: &Path, name: &str, specs: &[&str]) -> Result<Generated, St
     }
 
     let write = |path: &Path, body: &str| -> Result<String, String> {
-        fs::create_dir_all(path.parent().expect("a file path")).map_err(|e| format!("creating {}: {e}", path.display()))?;
+        fs::create_dir_all(path.parent().expect("a file path"))
+            .map_err(|e| format!("creating {}: {e}", path.display()))?;
         fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))?;
         Ok(path.display().to_string())
     };
     let db_name = db.clone().unwrap_or_else(|| "DB".into());
-    let mut written = add_module(root, "models", MODELS_MOD, name, &model_template(name, &ty, &table, &db_name, &fields), "", "")?;
+    let mut written =
+        add_module(root, "models", MODELS_MOD, name, &model_template(name, &ty, &table, &db_name, &fields), "", "")?;
     written.extend(add_module(
         root,
         "controllers",
@@ -326,17 +365,27 @@ CREATE TABLE {table} (
 }
 
 fn model_template(name: &str, ty: &str, table: &str, db: &str, fields: &[Field]) -> String {
-    let join = |f: &dyn Fn(usize, &Field) -> String, sep: &str| fields.iter().enumerate().map(|(i, x)| f(i, x)).collect::<Vec<_>>().join(sep);
+    let join = |f: &dyn Fn(usize, &Field) -> String, sep: &str| {
+        fields.iter().enumerate().map(|(i, x)| f(i, x)).collect::<Vec<_>>().join(sep)
+    };
     let struct_fields = join(&|_, f| format!("    pub {}: {},\n", f.name, f.rust), "");
     // SQLite hands booleans back as 0 and 1.
-    let read_bool = |f: &Field| if f.rust == "bool" { "    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n" } else { "" };
+    let read_bool =
+        |f: &Field| if f.rust == "bool" { "    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n" } else { "" };
     let row_fields = join(&|_, f| format!("{}    pub {}: {},\n", read_bool(f), f.name, f.rust), "");
     let rules: String = fields
         .iter()
         .filter(|f| f.rust == "String")
-        .map(|f| format!("        errors.check(\"{0}\", !self.{0}.trim().is_empty(), \"must not be empty\");\n", f.name))
+        .map(|f| {
+            format!("        errors.check(\"{0}\", !self.{0}.trim().is_empty(), \"must not be empty\");\n", f.name)
+        })
         .collect();
-    let rules = if rules.is_empty() { "        let _ = errors; // e.g. errors.check(\"price\", self.price >= 0, \"must not be negative\");\n".to_owned() } else { rules };
+    let rules = if rules.is_empty() {
+        "        let _ = errors; // e.g. errors.check(\"price\", self.price >= 0, \"must not be negative\");\n"
+            .to_owned()
+    } else {
+        rules
+    };
     let columns = join(&|_, f| f.name.to_owned(), ", ");
     let placeholders = join(&|i, _| format!("?{}", i + 1), ", ");
     let assignments = join(&|i, f| format!("{} = ?{}", f.name, i + 1), ", ");
@@ -456,7 +505,8 @@ async fn destroy(ctx: Ctx, Path(id): Path<i64>) -> Result<StatusCode> {{
 fn scaffold_test(table: &str, db: &str, fields: &[Field]) -> String {
     let path = table.replace('_', "-");
     let json = |pick: &dyn Fn(&Field) -> &'static str| {
-        let pairs: Vec<String> = fields.iter().map(|f| format!("\\\"{}\\\":{}", f.name, pick(f).replace('"', "\\\""))).collect();
+        let pairs: Vec<String> =
+            fields.iter().map(|f| format!("\\\"{}\\\":{}", f.name, pick(f).replace('"', "\\\""))).collect();
         format!("{{{}}}", pairs.join(","))
     };
     let (sample, changed) = (json(&|f| f.sample), json(&|f| f.changed));
@@ -625,8 +675,9 @@ pub fn app(root: &Path, name: &str) -> Result<Vec<String>, String> {
 }
 
 const COMPAT_DATE: &str = "2026-11-01";
-/// The published library is `doko-rs`; apps still import it as `doko`.
-const DOKO_VERSION: &str = "0.1";
+/// The published library is `doko-rs`; apps still import it as `doko`. The CLI and the library
+/// are released together under one version, so a new app asks for the library this CLI came with.
+const DOKO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn app_cargo_toml(name: &str) -> String {
     format!(
@@ -815,7 +866,10 @@ mod tests {
         let m = fs::read_to_string(root.0.join("src/mailers/mod.rs")).unwrap();
         assert!(m.ends_with("pub mod welcome;\npub mod password_reset;\n// doko:modules\n"), "{m}");
         let w = fs::read_to_string(root.0.join("src/mailers/password_reset.rs")).unwrap();
-        assert!(w.contains("subject: \"password reset\".into()") && w.contains("text: Some(\"Hello!\\n\".into())"), "{w}");
+        assert!(
+            w.contains("subject: \"password reset\".into()") && w.contains("text: Some(\"Hello!\\n\".into())"),
+            "{w}"
+        );
         assert!(mailer(&root.0, "welcome").unwrap_err().contains("already exists"));
     }
 
@@ -825,7 +879,13 @@ mod tests {
         app(&root.0, "shop").unwrap();
         let dir = root.0.join("shop");
         let out = auth(&dir).unwrap();
-        for file in ["src/controllers/auth.rs", "src/mailers/auth.rs", "migrations/0001_create_users.sql", "tests/auth.rs", ".dev.vars"] {
+        for file in [
+            "src/controllers/auth.rs",
+            "src/mailers/auth.rs",
+            "migrations/0001_create_users.sql",
+            "tests/auth.rs",
+            ".dev.vars",
+        ] {
             assert!(dir.join(file).exists(), "{file}");
         }
         let toml = fs::read_to_string(dir.join("doko.toml")).unwrap();
@@ -836,7 +896,10 @@ mod tests {
         }
         assert!(rendered.wrangler_toml.contains("APP_URL = \"http://localhost:8787\""));
         let controller = fs::read_to_string(dir.join("src/controllers/auth.rs")).unwrap();
-        assert!(controller.contains("use crate::bindings::{DB, EMAIL, RATE_LIMITER};") && !controller.contains("__"), "{controller}");
+        assert!(
+            controller.contains("use crate::bindings::{DB, EMAIL, RATE_LIMITER};") && !controller.contains("__"),
+            "{controller}"
+        );
         let lib = fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert!(lib.starts_with("mod bindings;\nmod mailers;\nmod controllers;\n"), "{lib}");
         assert!(lib.ends_with("use doko::RateLimiter;\n\ndoko::app!(App, objects: [RateLimiter]);\n"), "{lib}");
@@ -860,10 +923,16 @@ mod tests {
         let controller = fs::read_to_string(root.0.join("src/controllers/auth.rs")).unwrap();
         assert!(controller.contains("use crate::bindings::{MAIN, EMAIL, LIMITS};"), "{controller}");
         let toml = fs::read_to_string(root.0.join("doko.toml")).unwrap();
-        assert!(toml.contains("[email.EMAIL]") && !toml.contains("[kv.SESSIONS]") && !toml.contains("[d1.DB]"), "{toml}");
+        assert!(
+            toml.contains("[email.EMAIL]") && !toml.contains("[kv.SESSIONS]") && !toml.contains("[d1.DB]"),
+            "{toml}"
+        );
         assert!(crate::config::render(&toml).is_ok());
         let todo = out.todo.join("\n");
-        assert!(todo.contains("APP_URL") && todo.contains("mod bindings;") && todo.contains("objects: [RateLimiter]"), "{todo}");
+        assert!(
+            todo.contains("APP_URL") && todo.contains("mod bindings;") && todo.contains("objects: [RateLimiter]"),
+            "{todo}"
+        );
 
         let users = tmp("auth-users");
         fs::create_dir_all(users.0.join("migrations")).unwrap();
@@ -875,7 +944,8 @@ mod tests {
 
     #[test]
     fn patches_lib_with_existing_objects() {
-        let (out, todo) = patch_lib("mod bindings;\nmod controllers;\nuse doko::Hooks;\ndoko::app!(App, objects: [Room]);\n");
+        let (out, todo) =
+            patch_lib("mod bindings;\nmod controllers;\nuse doko::Hooks;\ndoko::app!(App, objects: [Room]);\n");
         let out = out.unwrap();
         assert!(out.starts_with("mod mailers;\nmod bindings;"), "{out}");
         assert!(out.contains("use doko::RateLimiter;\n\ndoko::app!(App, objects: [RateLimiter, Room]);"), "{out}");
@@ -896,14 +966,37 @@ mod tests {
         assert!(sql.contains("  name TEXT NOT NULL,\n  position INTEGER NOT NULL,\n  price REAL NOT NULL,\n  visible INTEGER NOT NULL,\n"), "{sql}");
         let model = read("src/models/category.rs");
         assert!(model.contains("pub struct CategoryInput {\n    pub name: String,\n    pub position: i64,\n    pub price: f64,\n    pub visible: bool,\n}"), "{model}");
-        assert!(model.contains("    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n    pub visible: bool,\n    pub created_at"), "{model}");
+        assert!(
+            model.contains(
+                "    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n    pub visible: bool,\n    pub created_at"
+            ),
+            "{model}"
+        );
         assert_eq!(model.matches("bool_from_sql").count(), 1, "the input struct reads JSON booleans");
-        assert!(model.contains("INSERT INTO categories (name, position, price, visible) VALUES (?1, ?2, ?3, ?4) RETURNING *"), "{model}");
-        assert!(model.contains("SET name = ?1, position = ?2, price = ?3, visible = ?4, updated_at = datetime('now') WHERE id = ?5"), "{model}");
+        assert!(
+            model.contains(
+                "INSERT INTO categories (name, position, price, visible) VALUES (?1, ?2, ?3, ?4) RETURNING *"
+            ),
+            "{model}"
+        );
+        assert!(
+            model.contains(
+                "SET name = ?1, position = ?2, price = ?3, visible = ?4, updated_at = datetime('now') WHERE id = ?5"
+            ),
+            "{model}"
+        );
         assert!(model.contains("(&input.name, &input.position, &input.price, &input.visible, id)"), "{model}");
-        assert!(model.contains("errors.check(\"name\", !self.name.trim().is_empty()") && !model.contains("errors.check(\"position\""), "{model}");
+        assert!(
+            model.contains("errors.check(\"name\", !self.name.trim().is_empty()")
+                && !model.contains("errors.check(\"position\""),
+            "{model}"
+        );
         let controller = read("src/controllers/categories.rs");
-        assert!(controller.contains("use crate::models::category::{Category, CategoryInput};") && controller.contains("\"/categories/{id}\""), "{controller}");
+        assert!(
+            controller.contains("use crate::models::category::{Category, CategoryInput};")
+                && controller.contains("\"/categories/{id}\""),
+            "{controller}"
+        );
         assert!(read("src/controllers/mod.rs").contains(".merge(categories::routes())"));
         let test = read("tests/categories.rs");
         assert!(test.contains(r#""{\"name\":\"first\",\"position\":1,\"price\":1.5,\"visible\":true}""#), "{test}");
@@ -928,7 +1021,14 @@ mod tests {
         assert!(scaffold(&root.0, "post", &["a:int", "a:int"]).unwrap_err().contains("twice"));
         assert!(scaffold(&root.0, "Post", &["a:int"]).is_err());
         assert!(!root.0.join("src").exists(), "nothing written");
-        for (one, many) in [("post", "posts"), ("category", "categories"), ("day", "days"), ("box", "boxes"), ("match", "matches"), ("address", "addresses")] {
+        for (one, many) in [
+            ("post", "posts"),
+            ("category", "categories"),
+            ("day", "days"),
+            ("box", "boxes"),
+            ("match", "matches"),
+            ("address", "addresses"),
+        ] {
             assert_eq!(plural(one), many);
         }
     }

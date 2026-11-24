@@ -333,11 +333,11 @@ async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
             SendFuture::new(hmac_verify(secret.as_bytes(), input.as_bytes(), &signature)).await.map_err(js_err)?
         }
         (Some("RS256"), Some(url)) => match jwk(url, header["kid"].as_str()).await? {
-            Some(key) => SendFuture::new(async {
-                rsa_verify("jwk", JSON::parse(&key)?, input.as_bytes(), &signature).await
-            })
-            .await
-            .map_err(js_err)?,
+            Some(key) => {
+                SendFuture::new(async { rsa_verify("jwk", JSON::parse(&key)?, input.as_bytes(), &signature).await })
+                    .await
+                    .map_err(js_err)?
+            }
             None => false,
         },
         (Some("RS256"), None) => {
@@ -350,7 +350,11 @@ async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
         _ => false,
     };
     let now = Date::now().as_millis() / 1000;
-    if valid && in_validity_window(&claims, now) && issued_for(&claims, &config) { Ok(claims) } else { Err(Error::unauthorized()) }
+    if valid && in_validity_window(&claims, now) && issued_for(&claims, &config) {
+        Ok(claims)
+    } else {
+        Err(Error::unauthorized())
+    }
 }
 
 // --- Signed tokens ---
@@ -517,7 +521,11 @@ impl Store {
     }
 
     fn ok(res: Response<Body>) -> Result<()> {
-        if res.status().is_success() { Ok(()) } else { Err(Error::internal(format!("session store answered {}", res.status()))) }
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::internal(format!("session store answered {}", res.status())))
+        }
     }
 }
 
@@ -561,7 +569,11 @@ impl Session {
         if let Some(old) = &self.id {
             store.delete(old).await?;
         }
-        set_cookie(config.session_cookie(), &format!("{id}.{}", URL_SAFE_NO_PAD.encode(signature)), config.session_ttl())
+        set_cookie(
+            config.session_cookie(),
+            &format!("{id}.{}", URL_SAFE_NO_PAD.encode(signature)),
+            config.session_ttl(),
+        )
     }
 
     /// Ends the session: deletes its data and expires the cookie.
@@ -640,7 +652,9 @@ impl DurableObject for SessionStore {
     async fn fetch(&self, req: Request) -> Result<Response<Body>> {
         let storage = self.0.storage();
         match *req.method() {
-            Method::GET => storage.get::<String>(DATA_KEY).await?.map(IntoResponse::into_response).ok_or_else(Error::not_found),
+            Method::GET => {
+                storage.get::<String>(DATA_KEY).await?.map(IntoResponse::into_response).ok_or_else(Error::not_found)
+            }
             Method::PUT => {
                 let Query(ttl) = Query::<Ttl>::try_from_uri(req.uri())?;
                 let data = String::from_utf8(to_bytes(req.into_body(), usize::MAX).await?.to_vec())?;
@@ -678,7 +692,15 @@ mod tests {
     fn parses_password_hashes() {
         let (iterations, salt, key) = parse_password_hash("pbkdf2-sha256$1000$c2FsdA==$a2V5").unwrap();
         assert_eq!((iterations, salt.as_slice(), key.as_slice()), (1000, &b"salt"[..], &b"key"[..]));
-        for bad in ["", "plaintext", "md5$1000$c2FsdA==$a2V5", "pbkdf2-sha256$0$c2FsdA==$a2V5", "pbkdf2-sha256$100001$c2FsdA==$a2V5", "pbkdf2-sha256$1000$c2FsdA==$a2V5$x", "pbkdf2-sha256$1000$!$a2V5"] {
+        for bad in [
+            "",
+            "plaintext",
+            "md5$1000$c2FsdA==$a2V5",
+            "pbkdf2-sha256$0$c2FsdA==$a2V5",
+            "pbkdf2-sha256$100001$c2FsdA==$a2V5",
+            "pbkdf2-sha256$1000$c2FsdA==$a2V5$x",
+            "pbkdf2-sha256$1000$!$a2V5",
+        ] {
             assert!(parse_password_hash(bad).is_none(), "{bad}");
         }
     }
@@ -686,9 +708,13 @@ mod tests {
     #[test]
     fn parses_jwts_and_checks_their_times() {
         // {"alg":"HS256","typ":"JWT"} . {"sub":"1"} . "sig"
-        let (input, header, claims, signature) = parse_jwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.c2ln").unwrap();
+        let (input, header, claims, signature) =
+            parse_jwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.c2ln").unwrap();
         assert_eq!(input, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0");
-        assert_eq!((header["alg"].as_str(), &claims, signature.as_slice()), (Some("HS256"), &json!({ "sub": "1" }), &b"sig"[..]));
+        assert_eq!(
+            (header["alg"].as_str(), &claims, signature.as_slice()),
+            (Some("HS256"), &json!({ "sub": "1" }), &b"sig"[..])
+        );
         assert!(parse_jwt("a.b").is_none());
         assert!(parse_jwt("not.a.jwt").is_none());
 
@@ -734,7 +760,11 @@ mod tests {
 
     #[test]
     fn picks_jwks_keys_by_kid() {
-        let keys = [json!({ "kty": "EC", "kid": "a" }), json!({ "kty": "RSA", "kid": "b" }), json!({ "kty": "RSA", "kid": "c" })];
+        let keys = [
+            json!({ "kty": "EC", "kid": "a" }),
+            json!({ "kty": "RSA", "kid": "b" }),
+            json!({ "kty": "RSA", "kid": "c" }),
+        ];
         assert!(find_jwk(&keys, Some("c")).unwrap().contains(r#""kid":"c""#));
         assert!(find_jwk(&keys, None).unwrap().contains(r#""kid":"b""#), "no kid: the first RSA key");
         assert!(find_jwk(&keys, Some("a")).is_none(), "not an RSA key");

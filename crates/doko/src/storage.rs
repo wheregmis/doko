@@ -66,7 +66,9 @@ binding!(
 );
 
 pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
-    move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))
+    move |e| {
+        Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))
+    }
 }
 
 // `worker` stores a string value as its bare text, which `get` then can't parse as JSON.
@@ -170,7 +172,8 @@ impl Bucket {
                         let rest = buf.split_off(PART_BYTES);
                         let part = std::mem::replace(&mut buf, rest);
                         if upload.is_none() {
-                            let started = self.0.create_multipart_upload(key).http_metadata(meta.clone()).execute().await?;
+                            let started =
+                                self.0.create_multipart_upload(key).http_metadata(meta.clone()).execute().await?;
                             upload = Some((started, Vec::new()));
                         }
                         let (upload, parts) = upload.as_mut().expect("just started");

@@ -11,13 +11,13 @@ use std::{
 };
 
 pub const DIR: &str = "migrations/pg";
-const CREATE_TABLE: &str =
-    "CREATE TABLE IF NOT EXISTS _doko_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())";
+const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS _doko_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())";
 
 /// File names are written into SQL as they are, so they are kept to characters that need no quoting.
 fn is_migration_file(name: &str) -> bool {
-    name.strip_suffix(".sql")
-        .is_some_and(|stem| !stem.is_empty() && stem.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+    name.strip_suffix(".sql").is_some_and(|stem| {
+        !stem.is_empty() && stem.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    })
 }
 
 /// The migration files in `dir`, in the order they apply.
@@ -29,7 +29,8 @@ pub fn files(dir: &Path) -> Result<Vec<String>, String> {
     };
     let mut names = Vec::new();
     for entry in entries {
-        let name = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?.file_name().to_string_lossy().into_owned();
+        let name =
+            entry.map_err(|e| format!("reading {}: {e}", dir.display()))?.file_name().to_string_lossy().into_owned();
         if !name.ends_with(".sql") {
             continue;
         }
@@ -83,14 +84,21 @@ fn psql(url: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>
         pipe.write_all(sql.as_bytes()).map_err(|e| format!("writing to psql: {e}"))?;
     }
     let out = child.wait_with_output().map_err(|e| format!("running psql: {e}"))?;
-    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) } else { Err(format!("psql exited with {}", out.status)) }
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!("psql exited with {}", out.status))
+    }
 }
 
 /// Applies the pending migrations in `dir` to the database at `url`.
 pub fn migrate(dir: &Path, url: &str) -> Result<(), String> {
     let files = files(dir)?;
     if files.is_empty() {
-        return Err(format!("no migrations in {}: create one with `doko generate migration <name> --pg`", dir.display()));
+        return Err(format!(
+            "no migrations in {}: create one with `doko generate migration <name> --pg`",
+            dir.display()
+        ));
     }
     println!("migrating {}", target(url));
     psql(url, &["-c", CREATE_TABLE], None)?;

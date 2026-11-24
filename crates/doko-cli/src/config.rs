@@ -130,7 +130,8 @@ fn check_auth(auth: &Table) -> Result<(), String> {
     if a.session_ttl_secs.is_some_and(|ttl| ttl < 60) {
         return Err("[auth]: `session_ttl_secs` must be at least 60".into());
     }
-    let is_cookie_name = |n: &String| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let is_cookie_name =
+        |n: &String| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !a.session_cookie.as_ref().is_none_or(is_cookie_name) {
         return Err("[auth]: `session_cookie` must be letters, digits, `_` or `-`".into());
     }
@@ -145,8 +146,21 @@ fn check_auth(auth: &Table) -> Result<(), String> {
 
 /// Wrangler keys doko writes itself; `[wrangler]` may not set them.
 const OWNED: [&str; 15] = [
-    "name", "main", "compatibility_date", "build", "migrations", "env", "triggers", "kv_namespaces", "r2_buckets",
-    "d1_databases", "queues", "durable_objects", "send_email", "hyperdrive", "ai",
+    "name",
+    "main",
+    "compatibility_date",
+    "build",
+    "migrations",
+    "env",
+    "triggers",
+    "kv_namespaces",
+    "r2_buckets",
+    "d1_databases",
+    "queues",
+    "durable_objects",
+    "send_email",
+    "hyperdrive",
+    "ai",
 ];
 
 // shortcut: the keys wrangler rejects inside `[env.*]`, listed by hand; add to it when wrangler adds one.
@@ -205,10 +219,15 @@ fn check_middleware(middleware: &Table) -> Result<(), String> {
     }
     // The browser sends scheme://host[:port], so anything else would never match.
     let is_origin = |o: &String| {
-        o == "*" || (o.starts_with("https://") || o.starts_with("http://")) && !o.ends_with('/') && o.matches('/').count() == 2
+        o == "*"
+            || (o.starts_with("https://") || o.starts_with("http://"))
+                && !o.ends_with('/')
+                && o.matches('/').count() == 2
     };
     if let Some(bad) = cors.origins.iter().find(|o| !is_origin(o)) {
-        return Err(format!("[middleware.cors]: origin `{bad}` must be `*` or like `https://app.example.com` (no path or trailing `/`)"));
+        return Err(format!(
+            "[middleware.cors]: origin `{bad}` must be `*` or like `https://app.example.com` (no path or trailing `/`)"
+        ));
     }
     if cors.credentials && cors.origins.iter().any(|o| o == "*") {
         return Err("[middleware.cors]: `credentials = true` needs exact origins, not `*`: any site could act as the signed-in user".into());
@@ -480,10 +499,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         ));
     }
     if !is_valid_compatibility_date(&cfg.app.compatibility_date) {
-        return Err(format!(
-            "doko.toml: app.compatibility_date `{}` must be YYYY-MM-DD",
-            cfg.app.compatibility_date
-        ));
+        return Err(format!("doko.toml: app.compatibility_date `{}` must be YYYY-MM-DD", cfg.app.compatibility_date));
     }
     if cfg.app.request_timeout_secs == Some(0) {
         return Err("doko.toml: app.request_timeout_secs must be at least 1".into());
@@ -508,7 +524,9 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         let mut extra = cfg.wrangler.clone();
         if env == DEFAULT_ENV {
             // Workers Logs, unless [wrangler.observability] says otherwise. Envs inherit it.
-            extra.entry("observability").or_insert_with(|| Value::Table(Table::from_iter([("enabled".to_owned(), Value::Boolean(true))])));
+            extra
+                .entry("observability")
+                .or_insert_with(|| Value::Table(Table::from_iter([("enabled".to_owned(), Value::Boolean(true))])));
         } else {
             extra.retain(|k, _| !TOP_LEVEL_ONLY.contains(&k));
         }
@@ -542,7 +560,11 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             consumers: b.queues.values().filter(|q| q.consume).cloned().collect(),
         });
         let durable_objects = (!b.durable.is_empty()).then(|| DurableObjects {
-            bindings: b.durable.iter().map(|(k, d)| DoBinding { name: k.clone(), class_name: d.class_name.clone() }).collect(),
+            bindings: b
+                .durable
+                .iter()
+                .map(|(k, d)| DoBinding { name: k.clone(), class_name: d.class_name.clone() })
+                .collect(),
         });
         let r = Resources {
             triggers: Triggers { crons },
@@ -578,10 +600,13 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
             && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
         if !valid || name.starts_with("DOKO_") {
-            return Err(format!("doko.toml: [secrets] required: `{name}` must be UPPER_SNAKE_CASE and not start with DOKO_"));
+            return Err(format!(
+                "doko.toml: [secrets] required: `{name}` must be UPPER_SNAKE_CASE and not start with DOKO_"
+            ));
         }
     }
-    let without_id = |b: &Bindings| b.hyperdrive.iter().filter(|(_, h)| h.id.is_none()).map(|(k, _)| k.clone()).collect::<Vec<_>>();
+    let without_id =
+        |b: &Bindings| b.hyperdrive.iter().filter(|(_, h)| h.id.is_none()).map(|(k, _)| k.clone()).collect::<Vec<_>>();
     let (resources, mut all) = resources_for(DEFAULT_ENV)?;
     let mut hyperdrive_without_id = BTreeMap::from([(DEFAULT_ENV.to_owned(), without_id(&all))]);
     // Every class in any env: migrations are shared, and an env override may bind a different class.
@@ -621,13 +646,19 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
     let body = toml::to_string(&wrangler).map_err(|e| e.to_string())?;
     let mut secrets = cfg.secrets.required.clone();
     // doko::auth's sessions and signed tokens can't work without it.
-    if (all.kv.contains_key("SESSIONS") || all.durable.contains_key("SESSIONS")) && !secrets.iter().any(|s| s == "SESSION_SECRET") {
+    if (all.kv.contains_key("SESSIONS") || all.durable.contains_key("SESSIONS"))
+        && !secrets.iter().any(|s| s == "SESSION_SECRET")
+    {
         secrets.push("SESSION_SECRET".into());
     }
     Ok(Output {
         wrangler_toml: format!("# Generated by doko from doko.toml. Do not edit.\n{body}"),
         bindings_rs: bindings_rs(&all),
-        d1_dirs: all.d1.iter().map(|(k, d)| (k.clone(), d.migrations_dir.clone().unwrap_or_else(|| "migrations".into()))).collect(),
+        d1_dirs: all
+            .d1
+            .iter()
+            .map(|(k, d)| (k.clone(), d.migrations_dir.clone().unwrap_or_else(|| "migrations".into())))
+            .collect(),
         d1: all.d1.into_keys().collect(),
         d1_by_env,
         hyperdrive,
@@ -649,15 +680,24 @@ fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>, app: &Ap
         .map_err(|e| format!("wrangler.toml: reading existing Durable Object migrations: {e}"))?
         .migrations;
     let names = |m: &Table, key: &str| -> Vec<String> {
-        m.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect()
+        m.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
     };
     let mut live = BTreeSet::new();
     for m in &migrations {
         live.extend(names(m, "new_sqlite_classes"));
         live.extend(names(m, "new_classes"));
-        for (from, to) in m.get("renamed_classes").and_then(Value::as_array).into_iter().flatten().filter_map(|r| {
-            Some((r.get("from")?.as_str()?.to_owned(), r.get("to")?.as_str()?.to_owned()))
-        }) {
+        for (from, to) in m
+            .get("renamed_classes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r.get("from")?.as_str()?.to_owned(), r.get("to")?.as_str()?.to_owned())))
+        {
             live.remove(&from);
             live.insert(to);
         }
@@ -681,7 +721,9 @@ fn migrations(previous_wrangler_toml: &str, classes: &BTreeSet<String>, app: &Ap
     let mut deleted = Vec::new();
     for class in &app.deleted_classes {
         if classes.contains(class) {
-            return Err(format!("doko.toml: class `{class}` is in app.deleted_classes but still has a [do.<NAME>] entry"));
+            return Err(format!(
+                "doko.toml: class `{class}` is in app.deleted_classes but still has a [do.<NAME>] entry"
+            ));
         }
         if live.remove(class) {
             deleted.push(Value::String(class.clone()));
@@ -715,7 +757,9 @@ fn bound<T: Clone>(m: &BTreeMap<String, T>) -> Vec<Bound<T>> {
 
 fn check_and_normalize_tasks(tasks: &mut BTreeMap<String, String>) -> Result<(), String> {
     for (name, schedule) in tasks.iter_mut() {
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        {
             return Err(format!("task `{name}` must be lowercase letters, digits, `_` or `-`"));
         }
         // Workers cron: 5 fields (minute hour day month weekday).
@@ -762,7 +806,13 @@ fn check_resources(b: &Bindings) -> Result<(), String> {
 }
 
 fn check_binding_names(b: &Bindings) -> Result<(), String> {
-    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys()).chain(b.durable.keys()).chain(b.email.keys());
+    let names =
+        b.kv.keys()
+            .chain(b.r2.keys())
+            .chain(b.d1.keys())
+            .chain(b.queues.keys())
+            .chain(b.durable.keys())
+            .chain(b.email.keys());
     let names = names.chain(b.hyperdrive.keys());
     let mut seen = BTreeSet::new();
     // `[ai]` takes this name in every env that declares it.
@@ -874,7 +924,10 @@ mod tests {
         assert_eq!(prod["limits"]["cpu_ms"].as_integer(), Some(50), "inherited");
         assert_eq!(prod["observability"]["enabled"].as_bool(), Some(false));
         assert!(!prod.contains_key("send_metrics"), "top-level only");
-        assert_eq!(parse("[wrangler.observability]\nenabled = false\n")["observability"]["enabled"].as_bool(), Some(false));
+        assert_eq!(
+            parse("[wrangler.observability]\nenabled = false\n")["observability"]["enabled"].as_bool(),
+            Some(false)
+        );
     }
 
     #[test]
@@ -896,7 +949,9 @@ mod tests {
 
     #[test]
     fn lists_required_secrets_and_missing_ids() {
-        let o = out("[secrets]\nrequired = [\"STRIPE_KEY\"]\n[kv.SESSIONS]\n[hyperdrive.PG]\n[env.prod.hyperdrive.PG]\nid = \"abc\"\n");
+        let o = out(
+            "[secrets]\nrequired = [\"STRIPE_KEY\"]\n[kv.SESSIONS]\n[hyperdrive.PG]\n[env.prod.hyperdrive.PG]\nid = \"abc\"\n",
+        );
         assert_eq!(o.secrets, ["STRIPE_KEY", "SESSION_SECRET"]);
         assert_eq!(o.hyperdrive_without_id["dev"], ["PG"]);
         assert!(o.hyperdrive_without_id["prod"].is_empty());
@@ -937,7 +992,9 @@ mod tests {
 
     #[test]
     fn renders_queues() {
-        let o = out("[queues.JOBS]\nqueue = \"jobs\"\nmax_retries = 3\ndead_letter_queue = \"jobs-dlq\"\n[env.prod.queues.JOBS]\nqueue = \"jobs-prod\"\n");
+        let o = out(
+            "[queues.JOBS]\nqueue = \"jobs\"\nmax_retries = 3\ndead_letter_queue = \"jobs-dlq\"\n[env.prod.queues.JOBS]\nqueue = \"jobs-prod\"\n",
+        );
         let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
         let q = &v["queues"];
         assert_eq!(q["producers"][0]["binding"].as_str(), Some("JOBS"));
@@ -960,7 +1017,9 @@ mod tests {
 
     #[test]
     fn renders_auth_settings_per_env() {
-        let v = parse("[auth]\nsession_ttl_secs = 3600\njwt_issuer = \"https://dev.example.com\"\n[env.prod.auth]\njwt_issuer = \"https://example.com\"\n");
+        let v = parse(
+            "[auth]\nsession_ttl_secs = 3600\njwt_issuer = \"https://dev.example.com\"\n[env.prod.auth]\njwt_issuer = \"https://example.com\"\n",
+        );
         assert_eq!(v["vars"]["DOKO_AUTH"]["jwt_issuer"].as_str(), Some("https://dev.example.com"));
         let prod = &v["env"]["prod"]["vars"]["DOKO_AUTH"];
         assert_eq!(prod["jwt_issuer"].as_str(), Some("https://example.com"));
@@ -1011,10 +1070,13 @@ mod tests {
     #[test]
     fn renames_and_deletes_classes_when_told_to() {
         let app = |extra: &str| format!("[app]\nname = \"hello\"\ncompatibility_date = \"2026-11-01\"\n{extra}");
-        let v1 = render(&app("[do.A]\nclass_name = \"Counter\"\n[do.B]\nclass_name = \"Room\"\n")).unwrap().wrangler_toml;
+        let v1 =
+            render(&app("[do.A]\nclass_name = \"Counter\"\n[do.B]\nclass_name = \"Room\"\n")).unwrap().wrangler_toml;
 
         // Counter becomes Tally (keeping its data) and Room goes away, in one migration.
-        let next = app("renamed_classes = [{ from = \"Counter\", to = \"Tally\" }]\ndeleted_classes = [\"Room\"]\n[do.A]\nclass_name = \"Tally\"\n");
+        let next = app(
+            "renamed_classes = [{ from = \"Counter\", to = \"Tally\" }]\ndeleted_classes = [\"Room\"]\n[do.A]\nclass_name = \"Tally\"\n",
+        );
         let v2 = render_over(&next, &v1).unwrap().wrangler_toml;
         let t: Table = toml::from_str(&v2).unwrap();
         let m = t["migrations"].as_array().unwrap();
@@ -1031,11 +1093,20 @@ mod tests {
 
     #[test]
     fn renders_the_request_timeout() {
-        let v: Table = toml::from_str(&render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 30\n[env.prod]\n").unwrap().wrangler_toml).unwrap();
+        let v: Table = toml::from_str(
+            &render(
+                "[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 30\n[env.prod]\n",
+            )
+            .unwrap()
+            .wrangler_toml,
+        )
+        .unwrap();
         assert_eq!(v["vars"]["DOKO_REQUEST_TIMEOUT_SECS"].as_str(), Some("30"));
         assert_eq!(v["env"]["prod"]["vars"]["DOKO_REQUEST_TIMEOUT_SECS"].as_str(), Some("30"));
         assert!(parse("")["vars"].get("DOKO_REQUEST_TIMEOUT_SECS").is_none());
-        assert!(render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 0\n").is_err());
+        assert!(
+            render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 0\n").is_err()
+        );
     }
 
     #[test]
@@ -1052,19 +1123,24 @@ mod tests {
 
     #[test]
     fn renders_hyperdrive_and_ai_bindings() {
-        let o = out(
-            "[ai]\n[hyperdrive.PG]\nlocal_connection_string = \"postgres://u:p@localhost:5432/app\"\n\
-             [env.prod.hyperdrive.PG]\nid = \"abc123\"\n",
-        );
+        let o = out("[ai]\n[hyperdrive.PG]\nlocal_connection_string = \"postgres://u:p@localhost:5432/app\"\n\
+             [env.prod.hyperdrive.PG]\nid = \"abc123\"\n");
         let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
         assert_eq!(v["ai"]["binding"].as_str(), Some("AI"));
         assert_eq!(v["hyperdrive"][0]["binding"].as_str(), Some("PG"));
         assert_eq!(v["hyperdrive"][0]["localConnectionString"].as_str(), Some("postgres://u:p@localhost:5432/app"));
-        assert_eq!(v["hyperdrive"][0]["id"].as_str(), Some(HYPERDRIVE_ID_UNSET), "wrangler requires an id, even locally");
+        assert_eq!(
+            v["hyperdrive"][0]["id"].as_str(),
+            Some(HYPERDRIVE_ID_UNSET),
+            "wrangler requires an id, even locally"
+        );
         let prod = &v["env"]["prod"];
         assert_eq!(prod["ai"]["binding"].as_str(), Some("AI"), "inherited");
         assert_eq!(prod["hyperdrive"][0]["id"].as_str(), Some("abc123"));
-        assert!(prod["hyperdrive"][0].get("localConnectionString").is_none(), "an env entry replaces the whole binding");
+        assert!(
+            prod["hyperdrive"][0].get("localConnectionString").is_none(),
+            "an env entry replaces the whole binding"
+        );
         assert!(o.bindings_rs.unwrap().contains("pub const PG: doko::HyperdriveBinding"));
         assert_eq!(o.hyperdrive["PG"].as_deref(), Some("postgres://u:p@localhost:5432/app"));
 
@@ -1176,11 +1252,9 @@ bucket_name = \"files-prod\"
 
     #[test]
     fn normalizes_cron_whitespace_and_tracks_d1_by_env() {
-        let o = out(
-            "[tasks]\ncleanup = \"0   3\t*  * *\"\n\
+        let o = out("[tasks]\ncleanup = \"0   3\t*  * *\"\n\
              [d1.MAIN]\ndatabase_name = \"main\"\n\
-             [env.prod.d1.ANALYTICS]\ndatabase_name = \"analytics\"\n",
-        );
+             [env.prod.d1.ANALYTICS]\ndatabase_name = \"analytics\"\n");
         let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
         assert_eq!(v["vars"]["DOKO_TASKS"]["cleanup"].as_str(), Some("0 3 * * *"));
         assert_eq!(v["triggers"]["crons"][0].as_str(), Some("0 3 * * *"));

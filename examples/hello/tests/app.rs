@@ -18,7 +18,10 @@ fn notes_and_jobs() {
 
     let res = app.post_json("/notes", &json!({ "body": " " }));
     assert_eq!(res.status, 422);
-    assert_eq!(res.json::<Value>(), json!({ "error": "validation failed", "fields": { "body": ["must not be empty"] } }));
+    assert_eq!(
+        res.json::<Value>(),
+        json!({ "error": "validation failed", "fields": { "body": ["must not be empty"] } })
+    );
     // A body that isn't a NewNote gets doko's error shape too.
     let res = app.send("POST", "/notes", &[("content-type", "application/json")], "{");
     assert_eq!(res.status, 400);
@@ -65,7 +68,10 @@ fn cache_varies_and_files_stream() {
     // One cached copy per accept-language value.
     let language = |l: &str| app.send("GET", "/language", &[("accept-language", l)], "");
     let de = language("de");
-    assert_eq!((de.body.as_str(), de.header("x-doko-cache"), de.header("vary")), ("de", Some("MISS"), Some("accept-language, origin")));   // `origin` is from [middleware.cors]
+    assert_eq!(
+        (de.body.as_str(), de.header("x-doko-cache"), de.header("vary")),
+        ("de", Some("MISS"), Some("accept-language, origin"))
+    ); // `origin` is from [middleware.cors]
     assert_eq!(language("en").body, "en", "another language is not served the German copy");
     let started = Instant::now();
     loop {
@@ -141,7 +147,12 @@ fn ai() {
     assert!(summarized.json::<Value>()["summary"].as_str().is_some_and(|s| !s.is_empty()), "{}", summarized.body);
 
     let streamed = app.post_json("/summarize/stream", &json!({ "text": text }));
-    assert_eq!((streamed.status, streamed.header("content-type")), (200, Some("text/event-stream")), "{}", streamed.body);
+    assert_eq!(
+        (streamed.status, streamed.header("content-type")),
+        (200, Some("text/event-stream")),
+        "{}",
+        streamed.body
+    );
     assert!(streamed.body.contains("data: ") && streamed.body.contains("[DONE]"), "{}", streamed.body);
 }
 
@@ -202,8 +213,12 @@ fn request_middleware() {
     let origin = ("origin", "http://localhost:5173");
     let res = app.send("GET", "/_health", &[origin], "");
     assert_eq!(res.header("access-control-allow-origin"), Some("http://localhost:5173"));
-    assert_eq!(app.send("GET", "/_health", &[("origin", "http://evil.example")], "").header("access-control-allow-origin"), None);
-    let preflight = [origin, ("access-control-request-method", "POST"), ("access-control-request-headers", "content-type")];
+    assert_eq!(
+        app.send("GET", "/_health", &[("origin", "http://evil.example")], "").header("access-control-allow-origin"),
+        None
+    );
+    let preflight =
+        [origin, ("access-control-request-method", "POST"), ("access-control-request-headers", "content-type")];
     let res = app.send("OPTIONS", "/notes", &preflight, "");
     assert_eq!(res.status, 204);
     assert_eq!(res.header("access-control-allow-headers"), Some("content-type"));

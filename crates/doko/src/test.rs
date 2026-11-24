@@ -170,7 +170,14 @@ fn parse_mails(lines: &[String]) -> Vec<MailLog> {
             i += 1;
         }
         let mut take = |name: &str| fields.remove(name).unwrap_or_default();
-        mails.push(MailLog { end: i, from: take("From"), to: take("To"), subject: take("Subject"), text_file: take("Text"), html_file: take("HTML") });
+        mails.push(MailLog {
+            end: i,
+            from: take("From"),
+            to: take("To"),
+            subject: take("Subject"),
+            text_file: take("Text"),
+            html_file: take("HTML"),
+        });
     }
     mails
 }
@@ -198,7 +205,8 @@ impl Response {
 
     /// Parses the body as JSON. Panics if it isn't `T`.
     pub fn json<T: DeserializeOwned>(&self) -> T {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("response is not the expected JSON ({e}): {}", self.body))
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("response is not the expected JSON ({e}): {}", self.body))
     }
 }
 
@@ -291,7 +299,8 @@ impl App {
             let found = parse_mails(&self.output()).into_iter().find(|m| m.end > *read && m.to.contains(to));
             // The announcement is printed before the body files are complete.
             if let Some(log) = found
-                && let (Ok(text), Ok(html)) = (std::fs::read_to_string(&log.text_file), std::fs::read_to_string(&log.html_file))
+                && let (Ok(text), Ok(html)) =
+                    (std::fs::read_to_string(&log.text_file), std::fs::read_to_string(&log.html_file))
             {
                 *read = log.end;
                 return Mail { from: log.from, to: log.to, subject: log.subject, text, html };
@@ -308,7 +317,8 @@ impl App {
         let started = Instant::now();
         loop {
             let output = self.output();
-            let done = output.iter().enumerate().skip(*read).find(|(_, line)| finished_job(line).as_deref() == Some(name));
+            let done =
+                output.iter().enumerate().skip(*read).find(|(_, line)| finished_job(line).as_deref() == Some(name));
             if let Some((at, _)) = done {
                 *read = at + 1;
                 return;
@@ -352,8 +362,11 @@ impl App {
         let req = req.body(body.to_owned()).unwrap_or_else(|e| panic!("building request to {path}: {e}"));
         let mut res = self.agent.run(req).unwrap_or_else(|e| panic!("request to {path} failed: {e}"));
         let body = res.body_mut().read_to_string().unwrap_or_else(|e| panic!("reading {path} body: {e}"));
-        let headers =
-            res.headers().iter().map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
+        let headers = res
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .collect();
         Response { status: res.status().as_u16(), headers, body }
     }
 }
@@ -369,11 +382,7 @@ fn echo_and_keep(stream: impl Read + Send + 'static, lines: Arc<Mutex<Vec<String
 }
 
 fn join_url(base: &str, path: &str) -> String {
-    if path.starts_with('/') {
-        format!("{base}{path}")
-    } else {
-        format!("{base}/{path}")
-    }
+    if path.starts_with('/') { format!("{base}{path}") } else { format!("{base}/{path}") }
 }
 
 impl Drop for App {
@@ -426,7 +435,10 @@ mod tests {
         let set = |v: &str| vec![("set-cookie".to_owned(), v.to_owned()), ("x-other".to_owned(), "a=b".to_owned())];
         store_cookies(&mut jar, &set("sid=abc.def; HttpOnly; Path=/"));
         store_cookies(&mut jar, &set("theme=dark"));
-        assert_eq!(jar, BTreeMap::from([("sid".to_owned(), "abc.def".to_owned()), ("theme".to_owned(), "dark".to_owned())]));
+        assert_eq!(
+            jar,
+            BTreeMap::from([("sid".to_owned(), "abc.def".to_owned()), ("theme".to_owned(), "dark".to_owned())])
+        );
         store_cookies(&mut jar, &set("sid=gone; Max-Age=0; Path=/"));
         store_cookies(&mut jar, &set("theme=; Path=/"));
         assert!(jar.is_empty(), "{jar:?}");
@@ -452,7 +464,10 @@ mod tests {
         .collect();
         let mails = parse_mails(&lines);
         assert_eq!(mails.len(), 2);
-        assert_eq!((mails[0].to.as_str(), mails[0].subject.as_str(), mails[0].end), ("ada@example.com", "Re: your order: shipped", 7));
+        assert_eq!(
+            (mails[0].to.as_str(), mails[0].subject.as_str(), mails[0].end),
+            ("ada@example.com", "Re: your order: shipped", 7)
+        );
         assert_eq!((mails[0].text_file.as_str(), mails[0].html_file.as_str()), ("/tmp/a.txt", "/tmp/a.html"));
         assert_eq!((mails[1].to.as_str(), mails[1].text_file.as_str()), ("bob@example.com", ""), "still being printed");
         assert_eq!(finished_job(&lines[7]).as_deref(), Some("count_words"));
