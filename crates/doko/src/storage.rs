@@ -24,7 +24,7 @@ use crate::{Error, Result};
 macro_rules! binding {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
-        #[derive(Clone, Copy, Debug)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub struct $name(pub(crate) &'static str);
 
         impl $name {
@@ -71,6 +71,9 @@ impl Kv {
 
     /// Like [`put`](Self::put), expiring after `ttl_secs`. KV's minimum TTL is 60 seconds.
     pub async fn put_ttl<T: Serialize>(&self, key: &str, value: &T, ttl_secs: u64) -> Result<()> {
+        if ttl_secs < 60 {
+            return Err(Error::internal(format!("KV expiration_ttl must be at least 60 seconds (got {ttl_secs})")));
+        }
         let put = self.0.put(key, value).map_err(worker::Error::from)?.expiration_ttl(ttl_secs);
         Ok(SendFuture::new(put.execute()).await.map_err(worker::Error::from)?)
     }
@@ -172,8 +175,19 @@ impl Db {
 
     /// Runs the statements in one transaction: all of them commit, or none do.
     pub async fn batch(&self, statements: Vec<Statement>) -> Result<()> {
+        if statements.is_empty() {
+            return Ok(());
+        }
         let stmts = statements.into_iter().map(|s| s.0.0).collect();
-        SendFuture::new(self.0.batch(stmts)).await?;
+        let results = SendFuture::new(self.0.batch(stmts)).await?;
+        for res in results {
+            if let Some(err) = res.error() {
+                return Err(Error::internal(err));
+            }
+            if !res.success() {
+                return Err(Error::internal("D1 batch statement failed"));
+            }
+        }
         Ok(())
     }
 

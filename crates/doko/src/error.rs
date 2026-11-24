@@ -54,6 +54,12 @@ impl Error {
     }
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status.as_u16(), self.message)
+    }
+}
+
 impl<E: std::error::Error> From<E> for Error {
     fn from(e: E) -> Self {
         Self::internal(e.to_string())
@@ -81,5 +87,11 @@ mod tests {
         let e: Error = "x".parse::<i32>().unwrap_err().into();
         assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(e.message().contains("invalid digit"));
+    }
+
+    #[test]
+    fn displays_status_and_message() {
+        let e = Error::bad_request("missing body");
+        assert_eq!(e.to_string(), "400: missing body");
     }
 }

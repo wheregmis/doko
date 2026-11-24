@@ -142,24 +142,60 @@ pub trait Hooks: 'static {
 }
 
 #[doc(hidden)]
-pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worker::Result<Response<Body>> {
+pub fn build_router<H: Hooks>() -> Router<Ctx> {
+    H::routes().layer(middleware::from_fn(log::requests))
+}
+
+#[doc(hidden)]
+pub async fn dispatch_fetch(
+    router: Router<Ctx>,
+    req: HttpRequest,
+    env: Env,
+    exec: Context,
+) -> worker::Result<Response<Body>> {
     let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
     // Middleware (e.g. the response cache) reads Ctx from here; handlers get it as state.
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
-    Ok(H::routes().layer(middleware::from_fn(log::requests)).with_state(ctx).call(req).await?)
+    Ok(router.with_state(ctx).call(req).await?)
+}
+
+#[doc(hidden)]
+pub async fn dispatch_scheduled(
+    lookup: impl Fn(&str, Ctx) -> Option<jobs::TaskFuture>,
+    event: ScheduledEvent,
+    env: Env,
+    exec: ScheduleContext,
+) {
+    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Scheduled(SendWrapper::new(exec)) };
+    jobs::run_tasks(ctx, lookup, event).await
+}
+
+#[doc(hidden)]
+pub async fn dispatch_queue(
+    jobs: &Jobs,
+    batch: jobs::QueueBatch,
+    env: Env,
+    exec: Context,
+) -> worker::Result<()> {
+    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
+    jobs::run_batch(ctx, jobs, batch).await
+}
+
+#[doc(hidden)]
+pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worker::Result<Response<Body>> {
+    dispatch_fetch(build_router::<H>(), req, env, exec).await
 }
 
 #[doc(hidden)]
 pub async fn scheduled<H: Hooks>(event: ScheduledEvent, env: Env, exec: ScheduleContext) {
-    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Scheduled(SendWrapper::new(exec)) };
-    jobs::run_tasks(ctx, H::tasks(), event).await
+    let tasks = H::tasks();
+    dispatch_scheduled(|name, ctx| tasks.spawn(name, ctx), event, env, exec).await
 }
 
 #[doc(hidden)]
 pub async fn queue<H: Hooks>(batch: jobs::QueueBatch, env: Env, exec: Context) -> worker::Result<()> {
-    let ctx = Ctx { env: SendWrapper::new(env), exec: Exec::Fetch(Arc::new(exec)) };
-    jobs::run_batch(ctx, H::jobs(), batch).await
+    dispatch_queue(&H::jobs(), batch, env, exec).await
 }
 
 #[doc(hidden)]
@@ -175,7 +211,12 @@ macro_rules! app {
             env: ::worker::Env,
             ctx: ::worker::Context,
         ) -> ::worker::Result<$crate::axum::http::Response<$crate::axum::body::Body>> {
-            $crate::fetch::<$app>(req, env, ctx).await
+            ::std::thread_local! {
+                static ROUTER: ::std::cell::OnceCell<$crate::axum::Router<$crate::Ctx>> =
+                    const { ::std::cell::OnceCell::new() };
+            }
+            let router = ROUTER.with(|c| c.get_or_init($crate::build_router::<$app>).clone());
+            $crate::dispatch_fetch(router, req, env, ctx).await
         }
 
         #[::worker::event(scheduled)]
@@ -184,7 +225,17 @@ macro_rules! app {
             env: ::worker::Env,
             ctx: ::worker::ScheduleContext,
         ) {
-            $crate::scheduled::<$app>(event, env, ctx).await
+            ::std::thread_local! {
+                static TASKS: ::std::cell::OnceCell<$crate::Tasks> =
+                    const { ::std::cell::OnceCell::new() };
+            }
+            $crate::dispatch_scheduled(
+                |name, ctx| TASKS.with(|c| c.get_or_init(<$app as $crate::Hooks>::tasks).spawn(name, ctx)),
+                event,
+                env,
+                ctx,
+            )
+            .await
         }
 
         #[::worker::event(queue)]
@@ -193,7 +244,9 @@ macro_rules! app {
             env: ::worker::Env,
             ctx: ::worker::Context,
         ) -> ::worker::Result<()> {
-            $crate::queue::<$app>(batch, env, ctx).await
+            static JOBS: ::std::sync::OnceLock<$crate::Jobs> = ::std::sync::OnceLock::new();
+            let jobs = JOBS.get_or_init(<$app as $crate::Hooks>::jobs);
+            $crate::dispatch_queue(jobs, batch, env, ctx).await
         }
     };
 }
