@@ -353,6 +353,57 @@ async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
     if valid && in_validity_window(&claims, now) && issued_for(&claims, &config) { Ok(claims) } else { Err(Error::unauthorized()) }
 }
 
+// --- Signed tokens ---
+
+/// Kept out of the signed text of session cookies and JWTs, so neither can pass as a token.
+const TOKEN_CONTEXT: &str = "doko-token:";
+
+#[derive(Serialize, Deserialize)]
+struct TokenBody {
+    purpose: String,
+    exp: u64,
+    data: Value,
+}
+
+/// A tamper-proof token carrying `data`, valid for `ttl_secs` and only for `purpose`: for the
+/// links in "verify your email" and "reset your password" mail. Signed with `SESSION_SECRET`.
+///
+/// ```ignore
+/// let token = auth::token(&ctx, "reset-password", &user.id, 3600).await?;
+/// let id: Option<i64> = auth::read_token(&ctx, "reset-password", &token).await?;
+/// ```
+///
+/// `data` is readable by whoever holds the token, so put ids in it, not secrets. A token works
+/// until it expires: to make one single-use, include something the action changes (see `generate auth`).
+pub async fn token<T: Serialize>(ctx: &Ctx, purpose: &str, data: &T, ttl_secs: u64) -> Result<String> {
+    let exp = (Date::now().as_millis() / 1000).saturating_add(ttl_secs);
+    let body = TokenBody { purpose: purpose.to_owned(), exp, data: serde_json::to_value(data)? };
+    let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&body)?);
+    let secret = ctx.secret(SESSION_SECRET)?;
+    let signed = format!("{TOKEN_CONTEXT}{body}");
+    let signature = SendFuture::new(hmac_sign(secret.as_bytes(), signed.as_bytes())).await.map_err(js_err)?;
+    Ok(format!("{body}.{}", URL_SAFE_NO_PAD.encode(signature)))
+}
+
+/// The data of a [`token`] made for `purpose`, or `None` if it is forged, expired, or for another purpose.
+pub async fn read_token<T: DeserializeOwned>(ctx: &Ctx, purpose: &str, token: &str) -> Result<Option<T>> {
+    let Some((body, signature)) = token.split_once('.') else { return Ok(None) };
+    let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else { return Ok(None) };
+    let secret = ctx.secret(SESSION_SECRET)?;
+    let signed = format!("{TOKEN_CONTEXT}{body}");
+    if !SendFuture::new(hmac_verify(secret.as_bytes(), signed.as_bytes(), &signature)).await.map_err(js_err)? {
+        return Ok(None);
+    }
+    let body = URL_SAFE_NO_PAD.decode(body).ok().and_then(|b| serde_json::from_slice::<TokenBody>(&b).ok());
+    Ok(body
+        .filter(|b| token_is_live(b, purpose, Date::now().as_millis() / 1000))
+        .and_then(|b| serde_json::from_value(b.data).ok()))
+}
+
+fn token_is_live(body: &TokenBody, purpose: &str, now_secs: u64) -> bool {
+    body.purpose == purpose && now_secs < body.exp
+}
+
 // --- Sessions ---
 
 /// The request's server-side session. Extract it in any handler; it is empty until [`set`](Self::set).
@@ -655,6 +706,14 @@ mod tests {
         assert!(!has_role(&json!({ "roles": ["editor"] }), "admin"));
         assert!(!has_role(&json!({ "role": "administrator", "roles": "admin" }), "admin"));
         assert!(!has_role(&json!({}), "admin"));
+    }
+
+    #[test]
+    fn tokens_expire_and_keep_to_their_purpose() {
+        let body = TokenBody { purpose: "reset".into(), exp: 100, data: Value::Null };
+        assert!(token_is_live(&body, "reset", 99));
+        assert!(!token_is_live(&body, "reset", 100), "expired");
+        assert!(!token_is_live(&body, "verify", 99), "another purpose");
     }
 
     #[test]

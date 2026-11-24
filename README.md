@@ -17,8 +17,8 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 
 | | |
 |---|---|
-| [Routing and handlers](#handlers) | axum routers, a `Ctx` extractor, JSON errors, request logs |
-| [Config and environments](#config-and-environments) | typed config merged per env, vars and secrets |
+| [Routing and handlers](#handlers) | axum routers, a `Ctx` extractor, JSON errors, request logs, validation, CORS and secure headers, an error hook |
+| [Config and environments](#config-and-environments) | typed config merged per env, vars and secrets, any wrangler setting through `[wrangler]` |
 | [Storage](#storage-kv-r2-d1) | typed KV, R2 and D1 bindings, plus D1 migrations |
 | [Cache](#cache) | response caching with stale-while-revalidate and global tag purges |
 | [Jobs and cron](#background-jobs-and-cron-tasks) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
@@ -27,7 +27,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
-| [Generators](#generators) | `doko new`, `generate controller \| job \| mailer \| migration` |
+| [Generators](#generators) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
 doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](https://github.com/wheregmis/doko/blob/master/ROADMAP.md) for the roadmap.
@@ -88,6 +88,30 @@ greeting = "hello (prod)"
 
 No `--env` means `dev`, and `[env.dev.config]` applies there. `ctx.env_name()` gives the active env. Use `ctx.var(name)` for plain vars, and `ctx.secret(name)` for secrets set with `wrangler secret put` (or `.dev.vars` locally). Never put secrets in doko.toml.
 
+### Other wrangler settings
+
+doko writes `wrangler.toml`, so a wrangler setting doko has no table of its own for goes under `[wrangler]`. It is copied into `wrangler.toml` as written, with wrangler's own key names:
+
+```toml
+[wrangler]
+workers_dev = false
+compatibility_flags = ["nodejs_compat"]
+
+[wrangler.vars]                  # plain vars, read with ctx.var("SUPPORT_EMAIL")
+SUPPORT_EMAIL = "help@example.com"
+
+[wrangler.assets]                # static files served from ./public
+directory = "public"
+
+[env.prod.wrangler]              # deep-merged over [wrangler] for `--env prod`
+routes = [{ pattern = "app.example.com", custom_domain = true }]
+```
+
+- **Every env gets the merged result**, like bindings do, so a service binding or var declared once under `[wrangler]` is not lost in `prod`. Tables are merged key by key; arrays and plain values are replaced.
+- **Logs are on.** doko writes `[observability] enabled = true` unless `[wrangler.observability]` says otherwise.
+- **What doko already writes can't be set here:** the name, bindings that have a doko table (`[kv.*]`, `[d1.*]` and the rest), `triggers`, `migrations`, and vars starting with `DOKO_`. doko.toml is rejected with a message naming the key.
+- Write var values as strings: `ctx.var` reads text.
+
 ## Handlers
 
 - Take `ctx: Ctx` directly as an argument.
@@ -95,7 +119,87 @@ No `--env` means `dev`, and `[env.dev.config]` applies there. `ctx.env_name()` g
 - Use `Error::not_found()`, `bad_request(..)`, `unauthorized()`, `forbidden()` or `Error::new(status, ..)` for `{"error": ".."}` responses.
 - `ctx.wait_until(fut)` runs work after the response is sent.
 
-Every request is logged as one JSON line, and responses carry `x-request-id` (the `cf-ray` header, or `-` locally). For CORS and other middleware, `.layer(...)` any tower layer onto your router.
+Every request is logged as one JSON line, and responses carry `x-request-id` (the `cf-ray` header, or `-` locally). `GET /_health` answers `{"ok": true}` without touching your routes or their auth, for uptime checks. For other middleware, `.layer(...)` any tower layer onto your router.
+
+### Pagination
+
+```rust
+use doko::{Page, Paged};
+
+// GET /posts?page=2&per_page=50
+async fn index(ctx: Ctx, page: Page) -> Result<Json<Paged<Post>>> {
+    let db = ctx.db(DB)?;
+    let posts = db.all("SELECT * FROM posts ORDER BY id DESC LIMIT ?1 OFFSET ?2", (page.limit(), page.offset())).await?;
+    let total = count(&db).await?;                 // SELECT COUNT(*) FROM posts
+    Ok(Json(page.of(posts, total)))
+}
+```
+
+The response is `{"items": [..], "page": 2, "per_page": 50, "total": 120, "total_pages": 3}`. Without the parameters a request gets page 1 of 20. `per_page` is capped at 100, so a client can't ask for a whole table.
+
+### Validation
+
+```rust
+use doko::{Errors, Valid, Validate};
+
+#[derive(Deserialize)]
+struct NewUser { email: String, password: String }
+
+impl Validate for NewUser {
+    fn validate(&self, errors: &mut Errors) {
+        errors.check("email", self.email.contains('@'), "must be an email address");
+        errors.check("password", self.password.len() >= 8, "must be at least 8 characters");
+    }
+}
+
+async fn signup(ctx: Ctx, Valid(user): Valid<NewUser>) -> Result<StatusCode> {
+    // Rules that need the database:
+    let mut errors = Errors::new();
+    errors.check("email", !taken(&ctx, &user.email).await?, "is taken");
+    errors.finish()?;
+    // ...
+}
+```
+
+`Valid<T>` reads a JSON body like axum's `Json<T>`, then runs `validate`. Broken rules get a 422:
+
+```json
+{ "error": "validation failed", "fields": { "password": ["must be at least 8 characters"] } }
+```
+
+A body that isn't JSON for `T` is answered in the same `{"error": ..}` shape, where axum's own `Json<T>` answers in plain text. Rules are plain Rust: there is no derive.
+
+### Middleware
+
+On by default, and tuned under `[middleware]` (`[env.<name>.middleware]` is deep-merged over it):
+
+```toml
+[middleware]
+secure_headers = false          # default: on
+body_limit_bytes = 1048576      # default: 2 MiB
+
+[middleware.cors]               # default: no CORS headers
+origins = ["https://app.example.com"]   # exact origins, or ["*"] for a public API
+credentials = true                      # cookies cross-origin; refused with "*"
+# methods, headers, max_age_secs
+```
+
+- **Secure headers.** `x-content-type-options: nosniff`, `x-frame-options: SAMEORIGIN` and `referrer-policy: strict-origin-when-cross-origin` on every response that doesn't set its own.
+- **Body limit.** Caps the bodies that `Valid`, `Json` and `Bytes` hold in memory. A handler that streams its `Body`, like an upload through `put_stream`, is not limited.
+- **CORS.** Preflights are answered by doko and never reach a handler. Without `headers`, any header the browser asks for is allowed.
+
+### Reporting errors
+
+```rust
+impl Hooks for App {
+    async fn on_error(ctx: Ctx, error: Error) {
+        // error.status(), error.message(): send them to an error tracker or a queue
+    }
+    // ...
+}
+```
+
+`on_error` gets every request answered with a 5xx, with the message the client didn't see. It runs after the response is sent, so it can't slow down or break the error response. A request cut off by `request_timeout_secs`, and failed jobs and tasks, are logged but don't reach it.
 
 ## Generators
 
@@ -116,6 +220,45 @@ doko generate mailer welcome
 ```
 
 This writes `src/mailers/welcome.rs`, a function that builds a `Message`, and declares it in `src/mailers/mod.rs`. Add `mod mailers;` once. See [Email](#email).
+
+```bash
+doko generate scaffold post title:string body:text published:bool
+```
+
+This writes a whole resource. Then `doko migrate && doko dev`.
+
+| File | What |
+|---|---|
+| `migrations/NNNN_create_posts.sql` | the `posts` table: your fields plus `id`, `created_at`, `updated_at` |
+| `src/models/post.rs` | `Post`, `PostInput` with its validation, and `Post::page`, `find`, `create`, `update`, `delete` as plain SQL |
+| `src/controllers/posts.rs` | `GET /posts` (paginated), `POST /posts`, `GET`, `PUT` and `DELETE /posts/{id}` |
+| `tests/posts.rs` | the five routes as an integration test |
+
+- **Field types:** `string`, `text`, `int`, `float`, `bool`. Every field is `NOT NULL`; text fields get a "must not be empty" rule to start from.
+- **No ORM.** The model is SQL you can read and change, and the generator runs once: later changes are yours, in a new migration and the model file.
+- **The routes are public** until you add `.require_auth()`.
+- It uses the app's first `[d1.*]` binding, or adds `[d1.DB]`. Plurals are the regular English ones (`category` → `categories`); rename by hand for others.
+
+```bash
+doko generate auth
+```
+
+This writes a working account system and wires it into the app:
+
+| File | What |
+|---|---|
+| `src/controllers/auth.rs` | `POST /auth/register`, `GET /auth/verify`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/forgot-password`, `POST /auth/reset-password` |
+| `src/mailers/auth.rs` | the verification and password-reset mail |
+| `migrations/NNNN_create_users.sql` | the `users` table |
+| `tests/auth.rs` | the flow as an integration test |
+
+It also adds what those need: the `[d1.*]`, `[email.*]`, `[kv.SESSIONS]` and `RateLimiter` bindings it doesn't find in doko.toml, `APP_URL` under `[wrangler.vars]`, a `SESSION_SECRET` in `.dev.vars`, and the modules and `RateLimiter` export in `src/lib.rs`. Whatever it can't add safely it prints as a `todo:` line. Then `doko migrate && doko dev`.
+
+- Register and forgot-password answer the same whether or not the address has an account, and a failed login takes as long as a successful one, so accounts can't be probed.
+- Register, login and both password routes are limited to 10 requests a minute per client.
+- A reset link works once and for an hour. It points at `APP_URL/reset-password?token=..`: that page is your frontend's, and it POSTs the token and the new password to `/auth/reset-password`.
+- Before deploying, run `wrangler secret put SESSION_SECRET` and set `FROM` in the mailer to an address on your mail domain.
+- The code is yours after that: the generator runs once and doesn't update it.
 
 ## Storage: KV, R2, D1
 
@@ -151,6 +294,8 @@ ctx.bucket(FILES)?.serve("logo.png").await   // streams with content-type + etag
 | `Db` | `all::<T>`, `first::<T>`, `run` (returns `changes`, `last_row_id`), `statement` + `batch` (one transaction) |
 
 D1 params are a tuple bound to `?1`, `?2` and so on: `(id,)`, `(name, age)` or `()`. Each wrapper has `.raw()` for the full `worker` API.
+
+D1 stores a `bool` as `1` or `0` and hands back a number. Mark boolean fields of a row struct with `#[serde(deserialize_with = "doko::bool_from_sql")]` so they read back as `bool`.
 
 **Uploads.** `put_stream` takes the handler's `body: Body` and stores it as it arrives, holding at most 8 MiB in memory. Bodies larger than that go to R2 as a multipart upload, a part at a time; if the body fails midway, nothing is stored.
 
@@ -391,6 +536,7 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 - **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp`, `nbf` and the configured `iss` / `aud`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
 - **JWKS.** With `jwks_url`, RS256 tokens are checked against the key their `kid` names. The key set is kept in memory for an hour; an unknown `kid` refetches it, at most once a minute, so rotated keys are picked up without a deploy. Set `jwt_issuer` too, or any tenant of a shared identity provider can mint tokens you accept.
 - **Roles.** `.require_role("admin")` is `.require_auth()` plus a 403 unless the session value or the JWT claims carry the role, as `"role": "admin"` or `"roles": ["admin", ..]`. What roles exist and who has them is up to the app.
+- **Signed tokens.** `auth::token(&ctx, "reset-password", &user.id, 3600).await?` makes a tamper-proof token for a link in a mail, and `auth::read_token::<i64>(&ctx, "reset-password", &token).await?` gives the data back, or `None` if the token is forged, expired or was made for another purpose. Tokens are signed with `SESSION_SECRET` and can't pass as a session cookie or a JWT. Their data is readable, so carry ids, not secrets.
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
 - **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/src/controllers/auth.rs).
 

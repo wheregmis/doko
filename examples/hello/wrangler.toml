@@ -20,6 +20,7 @@ crons = ["*/30 * * * *"]
 [vars]
 DOKO_ENV = "dev"
 DOKO_REQUEST_TIMEOUT_SECS = "10"
+MOTTO = "carry it with one strap"
 
 [vars.DOKO_CONFIG]
 contact_to = "owner@example.com"
@@ -32,6 +33,9 @@ prune = "*/30 * * * *"
 jwt_issuer = "doko-hello"
 session_cookie = "hello_session"
 session_ttl_secs = 86400
+
+[vars.DOKO_MIDDLEWARE.cors]
+origins = ["http://localhost:5173"]
 
 [[kv_namespaces]]
 binding = "CACHE"
@@ -76,12 +80,16 @@ localConnectionString = "postgres://doko:doko@127.0.0.1:5433/doko_hello"
 [ai]
 binding = "AI"
 
+[observability]
+enabled = true
+
 [env.prod.triggers]
 crons = ["0 3 * * *"]
 
 [env.prod.vars]
 DOKO_ENV = "prod"
 DOKO_REQUEST_TIMEOUT_SECS = "10"
+MOTTO = "carry it with one strap"
 
 [env.prod.vars.DOKO_CONFIG]
 contact_to = "owner@example.com"
@@ -94,6 +102,9 @@ prune = "0 3 * * *"
 jwt_issuer = "doko-hello"
 session_cookie = "hello_session"
 session_ttl_secs = 86400
+
+[env.prod.vars.DOKO_MIDDLEWARE.cors]
+origins = ["http://localhost:5173"]
 
 [[env.prod.kv_namespaces]]
 binding = "CACHE"

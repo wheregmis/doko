@@ -15,6 +15,28 @@ contact_to = "owner@example.com"
 [env.prod.config]
 greeting = "hello from doko (prod)"
 
+# Any wrangler setting doko has no table of its own for goes here and is copied into wrangler.toml as
+# written: custom domains (`routes`), `assets`, `placement`, `limits`, service bindings.
+# [env.<name>.wrangler] is deep-merged over it.
+[wrangler.vars]
+MOTTO = "carry it with one strap"   # plain vars, read with ctx.var("MOTTO")
+
+# [env.prod.wrangler]
+# routes = [{ pattern = "hello.example.com", custom_domain = true }]
+
+# What doko puts around every request. All optional; [env.<name>.middleware] is deep-merged over it.
+[middleware]
+# secure_headers = false        # default: nosniff, x-frame-options and referrer-policy on every response
+# body_limit_bytes = 1048576    # default: 2 MiB, for bodies read by Valid, Json and Bytes (not streamed uploads)
+
+# Lets a browser app on another origin call this API. Without it, no CORS headers are sent.
+[middleware.cors]
+origins = ["http://localhost:5173"]   # exact origins, or ["*"] for a public API
+# methods = ["GET", "POST"]           # default: GET, POST, PUT, PATCH, DELETE, OPTIONS
+# headers = ["content-type"]          # default: whatever the browser asks for
+# credentials = true                  # send cookies cross-origin; needs exact origins
+# max_age_secs = 600
+
 # Cron tasks: name = schedule. Handlers are registered in Hooks::tasks.
 [tasks]
 prune = "*/30 * * * *"

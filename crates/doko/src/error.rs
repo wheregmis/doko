@@ -3,7 +3,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use worker::console_error;
 
 /// `Result` with [`Error`] as the default error, for handlers and app code.
@@ -13,15 +14,22 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 ///
 /// Any `std::error::Error` converts into a 500 via `?`. The 500 body is generic and the
 /// real message goes to the log, so internals never leak to clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Error {
     status: StatusCode,
     message: String,
+    /// Per-field messages of a validation error, sent as `"fields"`.
+    fields: BTreeMap<String, Vec<String>>,
 }
 
 impl Error {
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self { status, message: message.into(), fields: BTreeMap::new() }
+    }
+
+    /// A 422 `{"error": "validation failed", "fields": {"email": ["is taken"]}}`.
+    pub(crate) fn invalid(fields: BTreeMap<String, Vec<String>>) -> Self {
+        Self { status: StatusCode::UNPROCESSABLE_ENTITY, message: "validation failed".into(), fields }
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -66,15 +74,30 @@ impl<E: std::error::Error> From<E> for Error {
     }
 }
 
+impl Error {
+    /// What the client sees. A server error's message stays in the log.
+    fn body(&self) -> Value {
+        let mut body = if self.status.is_server_error() {
+            json!({ "error": self.status.canonical_reason().unwrap_or("error").to_lowercase() })
+        } else {
+            json!({ "error": self.message })
+        };
+        if !self.fields.is_empty() {
+            body["fields"] = json!(self.fields);
+        }
+        body
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let message = if self.status.is_server_error() {
+        let mut res = (self.status, Json(self.body())).into_response();
+        if self.status.is_server_error() {
             console_error!("{}", json!({ "level": "error", "status": self.status.as_u16(), "error": self.message }));
-            self.status.canonical_reason().unwrap_or("error").to_lowercase()
-        } else {
-            self.message
-        };
-        (self.status, Json(json!({ "error": message }))).into_response()
+            // Picked up by doko's request middleware for `Hooks::on_error`.
+            res.extensions_mut().insert(self);
+        }
+        res
     }
 }
 
@@ -87,6 +110,15 @@ mod tests {
         let e: Error = "x".parse::<i32>().unwrap_err().into();
         assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(e.message().contains("invalid digit"));
+    }
+
+    #[test]
+    fn bodies_hide_server_errors_and_list_fields() {
+        assert_eq!(Error::internal("db password is hunter2").body(), json!({ "error": "internal server error" }));
+        assert_eq!(Error::not_found().body(), json!({ "error": "not found" }));
+        let invalid = Error::invalid(BTreeMap::from([("email".to_owned(), vec!["is taken".to_owned()])]));
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.body(), json!({ "error": "validation failed", "fields": { "email": ["is taken"] } }));
     }
 
     #[test]

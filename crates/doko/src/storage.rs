@@ -69,6 +69,11 @@ pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
     move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))
 }
 
+// `worker` stores a string value as its bare text, which `get` then can't parse as JSON.
+fn json<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_json::to_string(value)?)
+}
+
 /// A KV namespace. Values are stored as JSON.
 pub struct Kv(pub(crate) SendWrapper<KvStore>);
 
@@ -78,7 +83,7 @@ impl Kv {
     }
 
     pub async fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-        let put = self.0.put(key, value).map_err(worker::Error::from)?;
+        let put = self.0.put(key, json(value)?.as_str()).map_err(worker::Error::from)?;
         Ok(SendFuture::new(put.execute()).await.map_err(worker::Error::from)?)
     }
 
@@ -87,7 +92,7 @@ impl Kv {
         if ttl_secs < 60 {
             return Err(Error::internal(format!("KV expiration_ttl must be at least 60 seconds (got {ttl_secs})")));
         }
-        let put = self.0.put(key, value).map_err(worker::Error::from)?.expiration_ttl(ttl_secs);
+        let put = self.0.put(key, json(value)?.as_str()).map_err(worker::Error::from)?.expiration_ttl(ttl_secs);
         Ok(SendFuture::new(put.execute()).await.map_err(worker::Error::from)?)
     }
 
@@ -207,6 +212,29 @@ impl Bucket {
     }
 }
 
+/// Reads a boolean column. D1 and SQLite have no boolean type: `true` is stored as `1` and comes
+/// back as a number, which serde won't read into a `bool` by itself.
+///
+/// ```ignore
+/// #[derive(Deserialize)]
+/// struct Post {
+///     #[serde(deserialize_with = "doko::bool_from_sql")]
+///     published: bool,
+/// }
+/// ```
+pub fn bool_from_sql<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<bool, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Bool(bool),
+        Number(f64),
+    }
+    Ok(match serde::Deserialize::deserialize(deserializer)? {
+        Stored::Bool(b) => b,
+        Stored::Number(n) => n != 0.0,
+    })
+}
+
 /// A D1 database. `params` is a tuple bound to `?1`, `?2`, ...: `(id,)`, `(name, age)`, or `()`.
 pub struct Db(pub(crate) SendWrapper<D1Database>);
 
@@ -272,5 +300,24 @@ impl Db {
             return Err(Error::internal("D1 params must be a tuple, e.g. `(id,)` or `()`"));
         };
         Ok(self.0.prepare(sql).bind(&args)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(deserialize_with = "super::bool_from_sql")]
+        on: bool,
+    }
+
+    #[test]
+    fn reads_sql_booleans() {
+        let on = |json: &str| serde_json::from_str::<Row>(json).map(|r| r.on).ok();
+        assert_eq!(on(r#"{"on":1}"#), Some(true));
+        assert_eq!(on(r#"{"on":0}"#), Some(false));
+        assert_eq!(on(r#"{"on":1.0}"#), Some(true), "D1 returns numbers as floats");
+        assert_eq!(on(r#"{"on":true}"#), Some(true));
+        assert_eq!(on(r#"{"on":"yes"}"#), None);
     }
 }
