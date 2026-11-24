@@ -675,8 +675,9 @@ pub fn app(root: &Path, name: &str) -> Result<Vec<String>, String> {
 }
 
 const COMPAT_DATE: &str = "2026-11-01";
-/// The published library is `doko-rs`; apps still import it as `doko`.
-const DOKO_VERSION: &str = "0.1";
+/// The published library is `doko-rs`; apps still import it as `doko`. The CLI and the library
+/// are released together under one version, so a new app asks for the library this CLI came with.
+const DOKO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn app_cargo_toml(name: &str) -> String {
     format!(

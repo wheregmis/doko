@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # Opens or updates the release PR from the conventional commits on master. Merging that
+      # PR makes this same step tag the commit and create the GitHub release.
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+      # release-please bumps the version in Cargo.toml but can't regenerate Cargo.lock, and CI
+      # builds with --locked. So the lockfile is updated on the release PR's branch here.
+      - uses: actions/checkout@v4
+        if: steps.release.outputs.pr
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+      - name: Update Cargo.lock on the release PR
+        if: steps.release.outputs.pr
+        run: |
+          cargo update --workspace
+          if ! git diff --quiet Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update Cargo.lock for the release" Cargo.lock
+            git push
+          fi
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set, so ${{ needs.release-please.outputs.tag_name }} was not published to crates.io"
+            exit 0
+          fi
+          cargo publish -p doko-rs --locked
+          cargo publish -p doko-cli --locked

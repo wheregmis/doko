@@ -732,3 +732,13 @@ assert_eq!(mail.subject, "Reset your password");
 ```
 
 `mail_to` and `wait_for_job` each return a mail or a job once, so a second call waits for the next one. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. Postgres needs a database at the `local_connection_string`, and an app with `[ai]` needs `wrangler login` to start. See [examples/hello/tests/app.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/tests/app.rs).
+
+## Contributing and releases
+
+CI runs `cargo fmt --all --check`, `cargo clippy` with warnings as errors (natively, and for `wasm32-unknown-unknown`) and `cargo test` on every pull request. The integration tests that start `wrangler dev` run locally with `doko test`.
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please) from [conventional commits](https://www.conventionalcommits.org) on `master`:
+
+- `fix: ..` makes a patch release, `feat: ..` a minor one, and `feat!: ..` (a breaking change) a minor one too while the version is below 1.0. `docs:`, `chore:`, `ci:`, `test:` and `refactor:` commits don't make a release.
+- It keeps a release pull request open with the next version and the changelog. Merging that pull request tags the commit, creates the GitHub release, and publishes `doko-rs` and `doko-cli` to crates.io.
+- Both crates share one version, set in the root `Cargo.toml`.
