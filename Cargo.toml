@@ -12,7 +12,7 @@ keywords = ["cloudflare", "workers", "framework", "axum", "wasm"]
 categories = ["web-programming", "wasm"]
 
 [workspace.dependencies]
-doko = { path = "crates/doko" }
+doko = { path = "crates/doko", package = "doko-rs", version = "0.1.0" }
 worker = { version = "0.9", features = ["http", "axum", "d1", "queue"] }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "macros"] }
 tower-service = "0.3"

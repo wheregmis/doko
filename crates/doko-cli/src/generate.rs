@@ -185,13 +185,13 @@ publish = false
 crate-type = [\"cdylib\"]
 
 [dependencies]
-doko = {{ git = \"{DOKO_GIT}\" }}
+doko = {{ package = \"doko-rs\", git = \"{DOKO_GIT}\" }}
 # required: worker's #[event] macro expands to ::worker paths
 worker = {{ version = \"0.9\", features = [\"http\", \"axum\", \"d1\", \"queue\"] }}
 serde = {{ version = \"1\", features = [\"derive\"] }}
 
 [dev-dependencies]
-doko = {{ git = \"{DOKO_GIT}\", features = [\"test\"] }}
+doko = {{ package = \"doko-rs\", git = \"{DOKO_GIT}\", features = [\"test\"] }}
 
 [profile.release]
 lto = true

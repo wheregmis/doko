@@ -43,7 +43,7 @@ Phases 8 and 9 are on hold until the foundation is solid: hardening and the back
 ## Backlog
 
 Limits from the shipped phases, picked up when a user needs them:
-- Publish to crates.io so `doko new` stops depending on git.
+- Publish `doko-rs` (the library; `doko` is taken) and `doko-cli` to crates.io, then point `doko new` at the published version instead of git.
 - ES256 JWTs; an integration test for JWKS.
 - A proc-macro crate, only if a feature can't be done with `macro_rules!` and traits. Typed Workers RPC for Durable Objects is the first candidate.
 
