@@ -26,6 +26,7 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 8. Postgres | `[hyperdrive.NAME]`, `ctx.pg(NAME).await?` behind the `pg` feature with D1's `all`/`first`/`run`/`statement`+`batch`, `migrations/pg/` with `doko migrate --pg` and `generate migration <name> --pg` | `numeric`, arrays, intervals and timestamp params need a cast in SQL; one connection per `ctx.pg()` call (Hyperdrive pools them); migrations need `psql`; no interactive transactions beyond `batch` |
 | 9. Workers AI | `[ai]`, `ctx.ai()?.run::<In, Out>(model, &input)`, `.stream(..)` as server-sent events | No local inference: `doko dev` and tests call Cloudflare and are billed; image and audio models via `.raw()`; no AI Gateway or Vectorize bindings |
 | 11. Escape hatch | `[wrangler]` and `[env.NAME.wrangler]` copied into `wrangler.toml` (routes and custom domains, assets, placement, limits, service bindings), `[wrangler.vars]` for plain vars, `[observability]` on by default | Keys doko writes itself are rejected, not merged; the list of keys wrangler allows only at the top level is kept by hand |
+| 12. Requests | `Valid<T>` + `Validate` + `Errors` (422 with per-field messages; JSON rejections in doko's error shape), `[middleware]` with secure headers on by default, `body_limit_bytes` and `[middleware.cors]`, a built-in `/_health`, `Hooks::on_error` for every 5xx | Rules are hand-written (no derive); `Valid` reads JSON only, not forms or query strings; `on_error` doesn't see timeouts (504), panics, or failed jobs and tasks |
 
 ## Next
 
@@ -33,7 +34,6 @@ The products are covered; the next phases build the framework layer around them,
 
 | Phase | Goal | Scope |
 |---|---|---|
-| 12. Requests | Safe, uniform request handling without tower knowledge | A validating JSON extractor (422 with per-field errors, in doko's error shape); `[middleware]` in doko.toml for CORS, secure headers and a body-size limit, with safe defaults; a built-in `/_health`; `Hooks::on_error` for error reporting |
 | 13. `generate auth` | A working account system from one command | Users migration, register, login, logout, verify-email and forgot/reset-password controllers with their mailers, rate-limited, built on `doko::auth` |
 | 14. `generate scaffold` | A resource from one command | `doko generate scaffold post title:string body:text`: migration, a model in `src/models/` as plain SQL functions (no ORM), CRUD controller, test; a pagination helper |
 | 15. Tests | Tests that are easy to write and run | `doko test` (hides `-- --ignored`), seed files, a cookie jar / login helper, assertions on sent mail and enqueued jobs |

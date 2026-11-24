@@ -24,6 +24,7 @@ mod log;
 mod mail;
 #[cfg(feature = "pg")]
 mod pg;
+mod request;
 mod storage;
 #[cfg(feature = "test")]
 pub mod test;
@@ -39,6 +40,7 @@ pub use jobs::{Job, Jobs, Tasks};
 pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html, render_html, render_text};
 #[cfg(feature = "pg")]
 pub use pg::{Pg, PgStatement};
+pub use request::{Errors, Valid, Validate};
 pub use storage::{
     Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement,
 };
@@ -49,10 +51,11 @@ use std::{convert::Infallible, pin::pin, sync::Arc, time::Duration};
 use axum::{
     Router,
     body::Body,
-    extract::FromRequestParts,
+    extract::{DefaultBodyLimit, FromRequestParts},
     http::{Response, StatusCode, request::Parts},
     middleware,
     response::IntoResponse,
+    routing::get,
 };
 use futures_util::future::{Either, select};
 use serde::de::DeserializeOwned;
@@ -175,11 +178,21 @@ pub trait Hooks: 'static {
         email.reject("this address does not accept mail");
         async { Ok(()) }
     }
+
+    /// Called after a request was answered with a 5xx, with the error whose message the client
+    /// didn't see: send it to an error tracker or a queue. Runs after the response is sent.
+    fn on_error(_ctx: Ctx, _error: Error) -> impl Future<Output = ()> + 'static {
+        async {}
+    }
 }
 
 #[doc(hidden)]
 pub fn build_router<H: Hooks>() -> Router<Ctx> {
-    H::routes().layer(middleware::from_fn(log::requests))
+    // Added outside the app's routes, so its `.require_auth()` and `.rate_limit()` don't cover it.
+    H::routes()
+        .route("/_health", get(request::health))
+        .layer(middleware::from_fn(request::guard::<H>))
+        .layer(middleware::from_fn(log::requests))
 }
 
 #[doc(hidden)]
@@ -194,6 +207,12 @@ pub async fn dispatch_fetch(
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
     let timeout = ctx.var(TIMEOUT_VAR).and_then(|secs| secs.parse::<u64>().ok());
+    // Caps the bodies extractors buffer (`Valid`, `Json`, `Bytes`); axum's default is 2 MiB.
+    // A handler that streams `Body` (uploads) is not limited.
+    let router = match request::Config::load(&ctx).body_limit_bytes {
+        Some(max) => router.layer(DefaultBodyLimit::max(max)),
+        None => router,
+    };
     let response = router.with_state(ctx).call(req);
     let Some(secs) = timeout else {
         return Ok(response.await?);

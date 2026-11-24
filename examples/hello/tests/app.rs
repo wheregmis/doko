@@ -16,7 +16,13 @@ fn notes_and_jobs() {
     let health: Value = app.get("/health").json();
     assert_eq!(health, json!({ "status": "ok", "env": "dev" }));
 
-    assert_eq!(app.post_json("/notes", &json!({ "body": " " })).status, 400);
+    let res = app.post_json("/notes", &json!({ "body": " " }));
+    assert_eq!(res.status, 422);
+    assert_eq!(res.json::<Value>(), json!({ "error": "validation failed", "fields": { "body": ["must not be empty"] } }));
+    // A body that isn't a NewNote gets doko's error shape too.
+    let res = app.send("POST", "/notes", &[("content-type", "application/json")], "{");
+    assert_eq!(res.status, 400);
+    assert!(res.json::<Value>()["error"].is_string(), "{}", res.body);
     let res = app.post_json("/notes", &json!({ "body": "three little words" }));
     assert_eq!(res.status, 201, "{}", res.body);
     let id = res.json::<Value>()["id"].as_i64().unwrap();
@@ -61,7 +67,7 @@ fn cache_varies_and_files_stream() {
     // One cached copy per accept-language value.
     let language = |l: &str| app.send("GET", "/language", &[("accept-language", l)], "");
     let de = language("de");
-    assert_eq!((de.body.as_str(), de.header("x-doko-cache"), de.header("vary")), ("de", Some("MISS"), Some("accept-language")));
+    assert_eq!((de.body.as_str(), de.header("x-doko-cache"), de.header("vary")), ("de", Some("MISS"), Some("accept-language, origin")));   // `origin` is from [middleware.cors]
     assert_eq!(language("en").body, "en", "another language is not served the German copy");
     let started = Instant::now();
     loop {
@@ -182,6 +188,40 @@ fn websockets() {
     let members = app.get("/rooms/lobby/members");
     // 0 or 1: the test's socket was dropped without a close frame, so the room may still list it.
     assert!(members.status == 200 && members.json::<u64>() <= 1, "{}", members.body);
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn request_middleware() {
+    let app = doko::test::App::start(&[]);
+
+    let res = app.get("/_health");
+    assert_eq!(res.json::<Value>(), json!({ "ok": true }));
+    assert_eq!(res.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(res.header("access-control-allow-origin"), None, "no Origin, no CORS headers");
+
+    // CORS: the origin in doko.toml is allowed, others are not, and preflights never reach a handler.
+    let origin = ("origin", "http://localhost:5173");
+    let res = app.send("GET", "/_health", &[origin], "");
+    assert_eq!(res.header("access-control-allow-origin"), Some("http://localhost:5173"));
+    assert_eq!(app.send("GET", "/_health", &[("origin", "http://evil.example")], "").header("access-control-allow-origin"), None);
+    let preflight = [origin, ("access-control-request-method", "POST"), ("access-control-request-headers", "content-type")];
+    let res = app.send("OPTIONS", "/notes", &preflight, "");
+    assert_eq!(res.status, 204);
+    assert_eq!(res.header("access-control-allow-headers"), Some("content-type"));
+
+    // A 5xx hides its message from the client and hands it to Hooks::on_error after the response.
+    let res = app.get("/boom");
+    assert_eq!((res.status, res.json::<Value>()), (500, json!({ "error": "internal server error" })));
+    let started = Instant::now();
+    loop {
+        let res = app.get("/last-error");
+        if res.body == "the basket broke" {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "on_error never ran: {} {}", res.status, res.body);
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[test]

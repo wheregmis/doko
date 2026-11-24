@@ -6,7 +6,7 @@ mod tasks;
 
 use controllers::rooms::Room;
 use doko::{
-    Ctx, Hooks, InboundEmail, Jobs, Policy, RateLimit, RateLimiter, Result, RouterExt, Tasks,
+    Ctx, Error, Hooks, InboundEmail, Jobs, Policy, RateLimit, RateLimiter, Result, RouterExt, Tasks,
     axum::{
         Json, Router,
         http::{HeaderMap, header::ACCEPT_LANGUAGE},
@@ -29,6 +29,9 @@ impl Hooks for App {
             .route("/", get(index))
             .route("/health", get(health))
             .route("/motto", get(motto))
+            // A handler that fails, and what `on_error` below recorded about it.
+            .route("/boom", get(|| async { Err::<(), _>(Error::internal("the basket broke")) }))
+            .route("/last-error", get(last_error))
             .route("/token-length", get(token_length))
             // 3 requests a minute per API key (per client IP without one), counted in a Durable Object; then 429.
             .merge(
@@ -59,10 +62,21 @@ impl Hooks for App {
         ctx.db(bindings::DB)?.run("INSERT INTO notes (body) VALUES (?1)", (&note,)).await?;
         ctx.cache().purge_tag(bindings::CACHE, controllers::notes::TAG).await
     }
+
+    /// Every 5xx lands here after its response is sent. A real app would forward it to an error tracker.
+    async fn on_error(ctx: Ctx, error: Error) {
+        if let Ok(kv) = ctx.kv(bindings::CACHE) {
+            let _ = kv.put("last_error", &error.message()).await;
+        }
+    }
 }
 
 async fn index(ctx: Ctx) -> Result<String> {
     Ok(ctx.config::<Config>()?.greeting)
+}
+
+async fn last_error(ctx: Ctx) -> Result<String> {
+    ctx.kv(bindings::CACHE)?.get("last_error").await?.ok_or_else(Error::not_found)
 }
 
 /// A plain var from doko.toml's `[wrangler.vars]`.

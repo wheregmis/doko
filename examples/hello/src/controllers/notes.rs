@@ -1,7 +1,7 @@
 //! Notes in D1. GET responses are edge-cached and purged by tag on writes.
 
 use doko::{
-    Ctx, Error, Policy, Result, RouterExt,
+    Ctx, Error, Errors, Policy, Result, RouterExt, Valid, Validate,
     axum::{
         Json, Router,
         extract::Path,
@@ -28,6 +28,13 @@ struct Note {
 #[derive(Deserialize)]
 struct NewNote {
     body: String,
+}
+
+impl Validate for NewNote {
+    fn validate(&self, errors: &mut Errors) {
+        errors.check("body", !self.body.trim().is_empty(), "must not be empty");
+        errors.check("body", self.body.len() <= 10_000, "must be at most 10,000 bytes");
+    }
 }
 
 pub fn routes() -> Router<Ctx> {
@@ -64,10 +71,8 @@ async fn show(ctx: Ctx, Path(id): Path<i64>) -> Result<Json<Note>> {
     note.map(Json).ok_or_else(Error::not_found)
 }
 
-async fn create(ctx: Ctx, Json(new): Json<NewNote>) -> Result<(StatusCode, Json<Note>)> {
-    if new.body.trim().is_empty() {
-        return Err(Error::bad_request("body must not be empty"));
-    }
+/// `Valid` answers a body that isn't a `NewNote` or breaks its rules before this runs.
+async fn create(ctx: Ctx, Valid(new): Valid<NewNote>) -> Result<(StatusCode, Json<Note>)> {
     let note: Note = ctx
         .db(DB)?
         .first("INSERT INTO notes (body) VALUES (?1) RETURNING *", (&new.body,))

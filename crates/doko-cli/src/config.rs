@@ -45,6 +45,9 @@ struct DokoToml {
     /// Settings for `doko::auth`: see [`Auth`].
     #[serde(default)]
     auth: Table,
+    /// What doko puts around every request: see [`Middleware`].
+    #[serde(default)]
+    middleware: Table,
     /// Wrangler settings doko has no table for, copied into wrangler.toml as written.
     #[serde(default)]
     wrangler: Table,
@@ -88,6 +91,9 @@ struct Env {
     /// Each key listed here replaces the top-level `[auth]` key of the same name.
     #[serde(default)]
     auth: Table,
+    /// Deep-merged over the top-level `[middleware]`.
+    #[serde(default)]
+    middleware: Table,
     /// Deep-merged over the top-level `[wrangler]`.
     #[serde(default)]
     wrangler: Table,
@@ -149,6 +155,54 @@ fn passthrough(mut extra: Table) -> Result<(Table, Table), String> {
         return Err(format!("[wrangler]: var `{name}`: the DOKO_ prefix is reserved"));
     }
     Ok((vars, extra))
+}
+
+/// `[middleware]`, read by doko from the `DOKO_MIDDLEWARE` var. Every key is optional.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Middleware {
+    /// `false` turns off `x-content-type-options`, `x-frame-options` and `referrer-policy`.
+    #[allow(dead_code)]
+    secure_headers: Option<bool>,
+    /// The largest body an extractor buffers. Unset: 2 MiB.
+    body_limit_bytes: Option<u64>,
+    cors: Option<Cors>,
+}
+
+/// `[middleware.cors]`. Without it, no CORS headers are sent.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct Cors {
+    /// Exact origins like `https://app.example.com`, or `"*"` for any.
+    origins: Vec<String>,
+    methods: Option<Vec<String>>,
+    headers: Option<Vec<String>>,
+    #[serde(default)]
+    credentials: bool,
+    max_age_secs: Option<u64>,
+}
+
+fn check_middleware(middleware: &Table) -> Result<(), String> {
+    let m: Middleware = middleware.clone().try_into().map_err(|e| format!("[middleware]: {e}"))?;
+    if m.body_limit_bytes == Some(0) {
+        return Err("[middleware]: `body_limit_bytes` must be at least 1".into());
+    }
+    let Some(cors) = m.cors else { return Ok(()) };
+    if cors.origins.is_empty() {
+        return Err("[middleware.cors]: `origins` must list at least one origin".into());
+    }
+    // The browser sends scheme://host[:port], so anything else would never match.
+    let is_origin = |o: &String| {
+        o == "*" || (o.starts_with("https://") || o.starts_with("http://")) && !o.ends_with('/') && o.matches('/').count() == 2
+    };
+    if let Some(bad) = cors.origins.iter().find(|o| !is_origin(o)) {
+        return Err(format!("[middleware.cors]: origin `{bad}` must be `*` or like `https://app.example.com` (no path or trailing `/`)"));
+    }
+    if cors.credentials && cors.origins.iter().any(|o| o == "*") {
+        return Err("[middleware.cors]: `credentials = true` needs exact origins, not `*`: any site could act as the signed-in user".into());
+    }
+    Ok(())
 }
 
 // Field names match wrangler's, so wrangler docs apply as-is.
@@ -372,6 +426,8 @@ struct Vars {
     DOKO_CONFIG: Table,
     DOKO_TASKS: BTreeMap<String, String>,
     DOKO_AUTH: Table,
+    #[serde(skip_serializing_if = "Table::is_empty")]
+    DOKO_MIDDLEWARE: Table,
     // A string: wrangler vars that are numbers don't read back as text.
     #[serde(skip_serializing_if = "Option::is_none")]
     DOKO_REQUEST_TIMEOUT_SECS: Option<String>,
@@ -431,6 +487,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         let mut b = cfg.bindings.clone();
         let mut tasks = cfg.tasks.clone();
         let mut auth = cfg.auth.clone();
+        let mut middleware = cfg.middleware.clone();
         let mut extra = cfg.wrangler.clone();
         if env == DEFAULT_ENV {
             // Workers Logs, unless [wrangler.observability] says otherwise. Envs inherit it.
@@ -440,6 +497,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         }
         if let Some(e) = cfg.env.get(env) {
             merge(&mut extra, &e.wrangler);
+            merge(&mut middleware, &e.middleware);
             merge(&mut config, &e.config);
             merge(&mut auth, &e.auth);
             tasks.extend(e.tasks.clone());
@@ -457,6 +515,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         check_resources(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
         check_and_normalize_tasks(&mut tasks).map_err(|e| format!("doko.toml{at}: {e}"))?;
         check_auth(&auth).map_err(|e| format!("doko.toml{at}: {e}"))?;
+        check_middleware(&middleware).map_err(|e| format!("doko.toml{at}: {e}"))?;
         let (user_vars, extra) = passthrough(extra).map_err(|e| format!("doko.toml{at}: {e}"))?;
         let mut crons: Vec<String> = tasks.values().cloned().collect();
         crons.sort();
@@ -475,6 +534,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
                 DOKO_CONFIG: config,
                 DOKO_TASKS: tasks,
                 DOKO_AUTH: auth,
+                DOKO_MIDDLEWARE: middleware,
                 DOKO_REQUEST_TIMEOUT_SECS: cfg.app.request_timeout_secs.map(|s| s.to_string()),
                 user: user_vars,
             },
@@ -780,6 +840,23 @@ mod tests {
         assert_eq!(prod["observability"]["enabled"].as_bool(), Some(false));
         assert!(!prod.contains_key("send_metrics"), "top-level only");
         assert_eq!(parse("[wrangler.observability]\nenabled = false\n")["observability"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn renders_and_checks_middleware() {
+        assert!(!parse("")["vars"].as_table().unwrap().contains_key("DOKO_MIDDLEWARE"));
+        let v = parse(
+            "[middleware]\nbody_limit_bytes = 1024\n[middleware.cors]\norigins = [\"http://localhost:5173\"]\n\
+             [env.prod.middleware.cors]\norigins = [\"https://app.example\"]\ncredentials = true\n",
+        );
+        assert_eq!(v["vars"]["DOKO_MIDDLEWARE"]["cors"]["origins"][0].as_str(), Some("http://localhost:5173"));
+        let prod = &v["env"]["prod"]["vars"]["DOKO_MIDDLEWARE"];
+        assert_eq!(prod["cors"]["origins"][0].as_str(), Some("https://app.example"));
+        assert_eq!(prod["body_limit_bytes"].as_integer(), Some(1024), "inherited");
+        assert!(err("[middleware]\nsecure_header = false\n").contains("unknown field"));
+        assert!(err("[middleware.cors]\norigins = []\n").contains("at least one"));
+        assert!(err("[middleware.cors]\norigins = [\"https://app.example/\"]\n").contains("no path"));
+        assert!(err("[middleware.cors]\norigins = [\"*\"]\ncredentials = true\n").contains("exact origins"));
     }
 
     #[test]

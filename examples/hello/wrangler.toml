@@ -34,6 +34,9 @@ jwt_issuer = "doko-hello"
 session_cookie = "hello_session"
 session_ttl_secs = 86400
 
+[vars.DOKO_MIDDLEWARE.cors]
+origins = ["http://localhost:5173"]
+
 [[kv_namespaces]]
 binding = "CACHE"
 
@@ -99,6 +102,9 @@ prune = "0 3 * * *"
 jwt_issuer = "doko-hello"
 session_cookie = "hello_session"
 session_ttl_secs = 86400
+
+[env.prod.vars.DOKO_MIDDLEWARE.cors]
+origins = ["http://localhost:5173"]
 
 [[env.prod.kv_namespaces]]
 binding = "CACHE"

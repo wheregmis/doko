@@ -17,7 +17,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 
 | | |
 |---|---|
-| [Routing and handlers](#handlers) | axum routers, a `Ctx` extractor, JSON errors, request logs |
+| [Routing and handlers](#handlers) | axum routers, a `Ctx` extractor, JSON errors, request logs, validation, CORS and secure headers, an error hook |
 | [Config and environments](#config-and-environments) | typed config merged per env, vars and secrets, any wrangler setting through `[wrangler]` |
 | [Storage](#storage-kv-r2-d1) | typed KV, R2 and D1 bindings, plus D1 migrations |
 | [Cache](#cache) | response caching with stale-while-revalidate and global tag purges |
@@ -119,7 +119,71 @@ routes = [{ pattern = "app.example.com", custom_domain = true }]
 - Use `Error::not_found()`, `bad_request(..)`, `unauthorized()`, `forbidden()` or `Error::new(status, ..)` for `{"error": ".."}` responses.
 - `ctx.wait_until(fut)` runs work after the response is sent.
 
-Every request is logged as one JSON line, and responses carry `x-request-id` (the `cf-ray` header, or `-` locally). For CORS and other middleware, `.layer(...)` any tower layer onto your router.
+Every request is logged as one JSON line, and responses carry `x-request-id` (the `cf-ray` header, or `-` locally). `GET /_health` answers `{"ok": true}` without touching your routes or their auth, for uptime checks. For other middleware, `.layer(...)` any tower layer onto your router.
+
+### Validation
+
+```rust
+use doko::{Errors, Valid, Validate};
+
+#[derive(Deserialize)]
+struct NewUser { email: String, password: String }
+
+impl Validate for NewUser {
+    fn validate(&self, errors: &mut Errors) {
+        errors.check("email", self.email.contains('@'), "must be an email address");
+        errors.check("password", self.password.len() >= 8, "must be at least 8 characters");
+    }
+}
+
+async fn signup(ctx: Ctx, Valid(user): Valid<NewUser>) -> Result<StatusCode> {
+    // Rules that need the database:
+    let mut errors = Errors::new();
+    errors.check("email", !taken(&ctx, &user.email).await?, "is taken");
+    errors.finish()?;
+    // ...
+}
+```
+
+`Valid<T>` reads a JSON body like axum's `Json<T>`, then runs `validate`. Broken rules get a 422:
+
+```json
+{ "error": "validation failed", "fields": { "password": ["must be at least 8 characters"] } }
+```
+
+A body that isn't JSON for `T` is answered in the same `{"error": ..}` shape, where axum's own `Json<T>` answers in plain text. Rules are plain Rust: there is no derive.
+
+### Middleware
+
+On by default, and tuned under `[middleware]` (`[env.<name>.middleware]` is deep-merged over it):
+
+```toml
+[middleware]
+secure_headers = false          # default: on
+body_limit_bytes = 1048576      # default: 2 MiB
+
+[middleware.cors]               # default: no CORS headers
+origins = ["https://app.example.com"]   # exact origins, or ["*"] for a public API
+credentials = true                      # cookies cross-origin; refused with "*"
+# methods, headers, max_age_secs
+```
+
+- **Secure headers.** `x-content-type-options: nosniff`, `x-frame-options: SAMEORIGIN` and `referrer-policy: strict-origin-when-cross-origin` on every response that doesn't set its own.
+- **Body limit.** Caps the bodies that `Valid`, `Json` and `Bytes` hold in memory. A handler that streams its `Body`, like an upload through `put_stream`, is not limited.
+- **CORS.** Preflights are answered by doko and never reach a handler. Without `headers`, any header the browser asks for is allowed.
+
+### Reporting errors
+
+```rust
+impl Hooks for App {
+    async fn on_error(ctx: Ctx, error: Error) {
+        // error.status(), error.message(): send them to an error tracker or a queue
+    }
+    // ...
+}
+```
+
+`on_error` gets every request answered with a 5xx, with the message the client didn't see. It runs after the response is sent, so it can't slow down or break the error response. A request cut off by `request_timeout_secs`, and failed jobs and tasks, are logged but don't reach it.
 
 ## Generators
 

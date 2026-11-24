@@ -69,6 +69,11 @@ pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
     move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))
 }
 
+// `worker` stores a string value as its bare text, which `get` then can't parse as JSON.
+fn json<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_json::to_string(value)?)
+}
+
 /// A KV namespace. Values are stored as JSON.
 pub struct Kv(pub(crate) SendWrapper<KvStore>);
 
@@ -78,7 +83,7 @@ impl Kv {
     }
 
     pub async fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-        let put = self.0.put(key, value).map_err(worker::Error::from)?;
+        let put = self.0.put(key, json(value)?.as_str()).map_err(worker::Error::from)?;
         Ok(SendFuture::new(put.execute()).await.map_err(worker::Error::from)?)
     }
 
@@ -87,7 +92,7 @@ impl Kv {
         if ttl_secs < 60 {
             return Err(Error::internal(format!("KV expiration_ttl must be at least 60 seconds (got {ttl_secs})")));
         }
-        let put = self.0.put(key, value).map_err(worker::Error::from)?.expiration_ttl(ttl_secs);
+        let put = self.0.put(key, json(value)?.as_str()).map_err(worker::Error::from)?.expiration_ttl(ttl_secs);
         Ok(SendFuture::new(put.execute()).await.map_err(worker::Error::from)?)
     }
 
