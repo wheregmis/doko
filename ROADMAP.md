@@ -27,6 +27,7 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 9. Workers AI | `[ai]`, `ctx.ai()?.run::<In, Out>(model, &input)`, `.stream(..)` as server-sent events | No local inference: `doko dev` and tests call Cloudflare and are billed; image and audio models via `.raw()`; no AI Gateway or Vectorize bindings |
 | 11. Escape hatch | `[wrangler]` and `[env.NAME.wrangler]` copied into `wrangler.toml` (routes and custom domains, assets, placement, limits, service bindings), `[wrangler.vars]` for plain vars, `[observability]` on by default | Keys doko writes itself are rejected, not merged; the list of keys wrangler allows only at the top level is kept by hand |
 | 12. Requests | `Valid<T>` + `Validate` + `Errors` (422 with per-field messages; JSON rejections in doko's error shape), `[middleware]` with secure headers on by default, `body_limit_bytes` and `[middleware.cors]`, a built-in `/_health`, `Hooks::on_error` for every 5xx | Rules are hand-written (no derive); `Valid` reads JSON only, not forms or query strings; `on_error` doesn't see timeouts (504), panics, or failed jobs and tasks |
+| 13. `generate auth` | `doko generate auth`: users migration, `controllers/auth.rs` (register, verify, login, logout, me, forgot and reset password), `mailers/auth.rs`, `tests/auth.rs`; adds the missing bindings, `APP_URL`, a dev `SESSION_SECRET` and the `src/lib.rs` wiring; `auth::token` / `auth::read_token` (signed, purpose-bound, expiring) | D1 only (no `--pg`); the generated test doesn't follow the mailed links (no mail assertions until phase 15); a reset doesn't close sessions already open; no dev secret on Windows (a `todo:` is printed) |
 
 ## Next
 
@@ -34,7 +35,6 @@ The products are covered; the next phases build the framework layer around them,
 
 | Phase | Goal | Scope |
 |---|---|---|
-| 13. `generate auth` | A working account system from one command | Users migration, register, login, logout, verify-email and forgot/reset-password controllers with their mailers, rate-limited, built on `doko::auth` |
 | 14. `generate scaffold` | A resource from one command | `doko generate scaffold post title:string body:text`: migration, a model in `src/models/` as plain SQL functions (no ORM), CRUD controller, test; a pagination helper |
 | 15. Tests | Tests that are easy to write and run | `doko test` (hides `-- --ignored`), seed files, a cookie jar / login helper, assertions on sent mail and enqueued jobs |
 | 16. CLI | The tooling around an app | `doko routes`, `doko doctor` (wrangler, Node, wasm target, `psql`, missing ids and secrets per env), `doko db seed\|reset`, `doko console` (a SQL shell), `[secrets] required = [..]` checked before deploy, pending migrations applied (or refused) on deploy |

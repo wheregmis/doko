@@ -22,6 +22,7 @@ usage:
   doko generate controller <name>     scaffold src/controllers/<name>.rs (alias: g)
   doko generate job <name>            scaffold src/jobs/<name>.rs
   doko generate mailer <name>         scaffold src/mailers/<name>.rs
+  doko generate auth                  accounts: users migration, src/controllers/auth.rs, src/mailers/auth.rs
   doko generate migration <name> [DB] new D1 migration file (DB needed with several D1 bindings)
   doko generate migration <name> --pg new Postgres migration file in migrations/pg/";
 const WRANGLER: &str = "wrangler@4";
@@ -133,6 +134,20 @@ fn run(args: &[String]) -> Result<(), String> {
             for db in dbs {
                 wrangler(&[&["d1", "migrations", "apply", db.as_str()], rest].concat())?;
             }
+            Ok(())
+        }
+        ["generate" | "g", "auth"] => {
+            let out = generate::auth(Path::new("."))?;
+            for path in &out.written {
+                println!("wrote {path}");
+            }
+            // The new bindings need their constants and the rate limiter its class migration.
+            write_config()?;
+            println!("wrote wrangler.toml and {BINDINGS_RS}");
+            for step in &out.todo {
+                println!("todo: {step}");
+            }
+            println!("next: doko migrate && doko dev");
             Ok(())
         }
         ["generate" | "g", "controller", name] => {

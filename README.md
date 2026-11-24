@@ -27,7 +27,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
-| [Generators](#generators) | `doko new`, `generate controller \| job \| mailer \| migration` |
+| [Generators](#generators) | `doko new`, `generate auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
 doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](https://github.com/wheregmis/doko/blob/master/ROADMAP.md) for the roadmap.
@@ -204,6 +204,27 @@ doko generate mailer welcome
 ```
 
 This writes `src/mailers/welcome.rs`, a function that builds a `Message`, and declares it in `src/mailers/mod.rs`. Add `mod mailers;` once. See [Email](#email).
+
+```bash
+doko generate auth
+```
+
+This writes a working account system and wires it into the app:
+
+| File | What |
+|---|---|
+| `src/controllers/auth.rs` | `POST /auth/register`, `GET /auth/verify`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/forgot-password`, `POST /auth/reset-password` |
+| `src/mailers/auth.rs` | the verification and password-reset mail |
+| `migrations/NNNN_create_users.sql` | the `users` table |
+| `tests/auth.rs` | the flow as an integration test |
+
+It also adds what those need: the `[d1.*]`, `[email.*]`, `[kv.SESSIONS]` and `RateLimiter` bindings it doesn't find in doko.toml, `APP_URL` under `[wrangler.vars]`, a `SESSION_SECRET` in `.dev.vars`, and the modules and `RateLimiter` export in `src/lib.rs`. Whatever it can't add safely it prints as a `todo:` line. Then `doko migrate && doko dev`.
+
+- Register and forgot-password answer the same whether or not the address has an account, and a failed login takes as long as a successful one, so accounts can't be probed.
+- Register, login and both password routes are limited to 10 requests a minute per client.
+- A reset link works once and for an hour. It points at `APP_URL/reset-password?token=..`: that page is your frontend's, and it POSTs the token and the new password to `/auth/reset-password`.
+- Before deploying, run `wrangler secret put SESSION_SECRET` and set `FROM` in the mailer to an address on your mail domain.
+- The code is yours after that: the generator runs once and doesn't update it.
 
 ## Storage: KV, R2, D1
 
@@ -479,6 +500,7 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 - **JWTs.** `Claims<T>` reads `Authorization: Bearer`, checks the signature, `exp`, `nbf` and the configured `iss` / `aud`, and deserializes the claims into `T`. `auth::sign` adds `iat` and `exp`. Each algorithm has its own key, so a token can't choose HS256 to be checked against the RS256 public key.
 - **JWKS.** With `jwks_url`, RS256 tokens are checked against the key their `kid` names. The key set is kept in memory for an hour; an unknown `kid` refetches it, at most once a minute, so rotated keys are picked up without a deploy. Set `jwt_issuer` too, or any tenant of a shared identity provider can mint tokens you accept.
 - **Roles.** `.require_role("admin")` is `.require_auth()` plus a 403 unless the session value or the JWT claims carry the role, as `"role": "admin"` or `"roles": ["admin", ..]`. What roles exist and who has them is up to the app.
+- **Signed tokens.** `auth::token(&ctx, "reset-password", &user.id, 3600).await?` makes a tamper-proof token for a link in a mail, and `auth::read_token::<i64>(&ctx, "reset-password", &token).await?` gives the data back, or `None` if the token is forged, expired or was made for another purpose. Tokens are signed with `SESSION_SECRET` and can't pass as a session cookie or a JWT. Their data is readable, so carry ids, not secrets.
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
 - **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](https://github.com/wheregmis/doko/blob/master/examples/hello/src/controllers/auth.rs).
 

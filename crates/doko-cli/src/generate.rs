@@ -64,6 +64,152 @@ pub fn job(root: &Path, name: &str) -> Result<Vec<String>, String> {
     add_module(root, "jobs", JOBS_MOD, name, &job_template(name, &ty), "// doko:jobs", &format!(".add::<{name}::{ty}>()"))
 }
 
+/// What `generate auth` wrote, and what it could not do itself.
+#[derive(Debug)]
+pub struct Auth {
+    pub written: Vec<String>,
+    pub todo: Vec<String>,
+}
+
+/// `doko generate auth`: a users migration, `controllers/auth.rs`, `mailers/auth.rs` and a test,
+/// plus the bindings, var and secret they need.
+pub fn auth(root: &Path) -> Result<Auth, String> {
+    let toml_path = root.join("doko.toml");
+    let doko_toml = fs::read_to_string(&toml_path).map_err(|e| format!("reading doko.toml: {e}"))?;
+    let doc: toml::Table = toml::from_str(&doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
+    let table = |path: &[&str]| path.iter().try_fold(&doc, |t, key| t.get(*key)?.as_table());
+    let first = |kind: &str| table(&[kind]).and_then(|t| t.keys().next().cloned());
+
+    // Use the app's own bindings where it has them; declare the rest.
+    let mut add = String::new();
+    let db = first("d1").unwrap_or_else(|| {
+        let app = table(&["app"]).and_then(|a| a.get("name")?.as_str()).unwrap_or("app");
+        add += &format!("\n# The accounts table lives here: migrations/*_create_users.sql.\n[d1.DB]\ndatabase_name = \"{app}\"\n");
+        "DB".into()
+    });
+    let email = first("email").unwrap_or_else(|| {
+        add += "\n# Sends the verification and password-reset mail. Under `doko dev` mail is logged, not sent.\n[email.EMAIL]\n";
+        "EMAIL".into()
+    });
+    let limiter = table(&["do"])
+        .and_then(|d| d.iter().find(|(_, v)| v.get("class_name").and_then(|c| c.as_str()) == Some("RateLimiter")))
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| {
+            add += "\n# Limits login, registration and reset attempts per client.\n[do.RATE_LIMITER]\nclass_name = \"RateLimiter\"\n";
+            "RATE_LIMITER".into()
+        });
+    if table(&["kv", "SESSIONS"]).is_none() && table(&["do", "SESSIONS"]).is_none() {
+        add += "\n# Session data for doko::auth::Session.\n[kv.SESSIONS]\n";
+    }
+    let mut todo = Vec::new();
+    if table(&["wrangler", "vars"]).is_some_and(|v| v.contains_key("APP_URL")) {
+    } else if table(&["wrangler", "vars"]).is_some() {
+        // A second [wrangler.vars] header would be invalid TOML.
+        todo.push("add `APP_URL = \"http://localhost:8787\"` under [wrangler.vars] in doko.toml: the links in mail start with it".into());
+    } else {
+        add += "\n# Where the links in mail point. Set it per env: [env.prod.wrangler.vars].\n[wrangler.vars]\nAPP_URL = \"http://localhost:8787\"\n";
+    }
+
+    let migrations = root.join(table(&["d1", &db]).and_then(|d| d.get("migrations_dir")?.as_str()).unwrap_or("migrations"));
+    let existing: Vec<String> = fs::read_dir(&migrations)
+        .map(|dir| dir.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+        .unwrap_or_default();
+    for name in existing.iter().filter(|n| n.ends_with(".sql")) {
+        let sql = fs::read_to_string(migrations.join(name)).unwrap_or_default().to_lowercase();
+        if sql.contains("create table users") || sql.contains("create table if not exists users") {
+            return Err(format!("{} already creates a `users` table", migrations.join(name).display()));
+        }
+    }
+    let next = existing.iter().filter_map(|n| n.split('_').next()?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+    let migration = migrations.join(format!("{next:04}_create_users.sql"));
+    let test = root.join("tests/auth.rs");
+    for path in [root.join("src/controllers/auth.rs"), root.join("src/mailers/auth.rs"), test.clone()] {
+        if path.exists() {
+            return Err(format!("{} already exists", path.display()));
+        }
+    }
+
+    let fill = |template: &str| template.replace("__DB__", &db).replace("__EMAIL__", &email).replace("__RATE_LIMITER__", &limiter);
+    let write = |path: &Path, body: &str| -> Result<String, String> {
+        fs::create_dir_all(path.parent().expect("a file path")).map_err(|e| format!("creating {}: {e}", path.display()))?;
+        fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(path.display().to_string())
+    };
+    let controller = fill(include_str!("../templates/auth/controller.rs"));
+    let mut written = add_module(root, "controllers", CONTROLLERS_MOD, "auth", &controller, ROUTES_MARKER, ".merge(auth::routes())")?;
+    written.extend(add_module(root, "mailers", MAILERS_MOD, "auth", include_str!("../templates/auth/mailer.rs"), "", "")?);
+    written.push(write(&migration, include_str!("../templates/auth/migration.sql"))?);
+    written.push(write(&test, &fill(include_str!("../templates/auth/test.rs")))?);
+    if !add.is_empty() {
+        written.push(write(&toml_path, &format!("{}\n{add}", doko_toml.trim_end()))?);
+    }
+
+    // Local secret only: .dev.vars is read by `wrangler dev` and never deployed.
+    let dev_vars = root.join(".dev.vars");
+    let current = fs::read_to_string(&dev_vars).unwrap_or_default();
+    if !current.lines().any(|l| l.starts_with("SESSION_SECRET=")) {
+        match random_hex() {
+            Some(secret) => {
+                let sep = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+                written.push(write(&dev_vars, &format!("{current}{sep}SESSION_SECRET={secret}\n"))?);
+            }
+            None => todo.push("add `SESSION_SECRET=<a long random string>` to .dev.vars".into()),
+        }
+    }
+    todo.push("before deploying: `wrangler secret put SESSION_SECRET`, and set `FROM` in src/mailers/auth.rs to an address on your mail domain".into());
+
+    let lib = root.join("src/lib.rs");
+    let (patched, manual) = patch_lib(&fs::read_to_string(&lib).unwrap_or_default());
+    todo.extend(manual);
+    if let Some(patched) = patched {
+        written.push(write(&lib, &patched)?);
+    }
+    Ok(Auth { written, todo })
+}
+
+fn random_hex() -> Option<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    // shortcut: no /dev/urandom on Windows, where the user is told to set the secret; use a crate if that matters.
+    fs::File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Adds what `generate auth` needs to `src/lib.rs`: the modules, and `RateLimiter` among the
+/// exported objects. Returns the new source if it changed, and what is left to do by hand.
+fn patch_lib(src: &str) -> (Option<String>, Vec<String>) {
+    let mut out = src.to_owned();
+    let mut todo = Vec::new();
+    for module in ["mailers", "controllers", "bindings"] {
+        if out.lines().any(|l| l.trim() == format!("mod {module};")) {
+            continue;
+        }
+        // Before the first item, so inner doc comments stay at the top.
+        match out.lines().find(|l| l.starts_with("mod ") || l.starts_with("use ")).map(|l| l.as_ptr() as usize - out.as_ptr() as usize) {
+            Some(at) => out.insert_str(at, &format!("mod {module};\n")),
+            None => todo.push(format!("add `mod {module};` to src/lib.rs")),
+        }
+    }
+    if !out.contains("controllers::routes()") {
+        todo.push("merge `controllers::routes()` into Hooks::routes in src/lib.rs".into());
+    }
+    let call = out.find("doko::app!(").and_then(|start| Some((start, start + out[start..].find(");")?)));
+    match call {
+        Some((start, end)) if !out[start..end].contains("RateLimiter") => {
+            match out[start..end].find("objects: [") {
+                Some(list) => out.insert_str(start + list + "objects: [".len(), "RateLimiter, "),
+                None => out.insert_str(end, ", objects: [RateLimiter]"),
+            }
+            if !out[..start].contains("RateLimiter") {
+                out.insert_str(start, "use doko::RateLimiter;\n\n");
+            }
+        }
+        Some(_) => {}
+        None => todo.push("export the rate limiter in src/lib.rs: `doko::app!(App, objects: [RateLimiter]);` with `use doko::RateLimiter;`".into()),
+    }
+    ((out != src).then_some(out), todo)
+}
+
 fn check_snake(kind: &str, name: &str) -> Result<(), String> {
     let valid = name.starts_with(|c: char| c.is_ascii_lowercase())
         && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
@@ -362,6 +508,71 @@ mod tests {
         let w = fs::read_to_string(root.0.join("src/mailers/password_reset.rs")).unwrap();
         assert!(w.contains("subject: \"password reset\".into()") && w.contains("text: Some(\"Hello!\\n\".into())"), "{w}");
         assert!(mailer(&root.0, "welcome").unwrap_err().contains("already exists"));
+    }
+
+    #[test]
+    fn generates_auth_into_a_new_app() {
+        let root = tmp("auth");
+        app(&root.0, "shop").unwrap();
+        let dir = root.0.join("shop");
+        let out = auth(&dir).unwrap();
+        for file in ["src/controllers/auth.rs", "src/mailers/auth.rs", "migrations/0001_create_users.sql", "tests/auth.rs", ".dev.vars"] {
+            assert!(dir.join(file).exists(), "{file}");
+        }
+        let toml = fs::read_to_string(dir.join("doko.toml")).unwrap();
+        let rendered = crate::config::render(&toml).expect("the patched doko.toml is valid");
+        let bindings = rendered.bindings_rs.unwrap();
+        for binding in ["DB", "EMAIL", "RATE_LIMITER", "SESSIONS"] {
+            assert!(bindings.contains(&format!("pub const {binding}:")), "{binding}");
+        }
+        assert!(rendered.wrangler_toml.contains("APP_URL = \"http://localhost:8787\""));
+        let controller = fs::read_to_string(dir.join("src/controllers/auth.rs")).unwrap();
+        assert!(controller.contains("use crate::bindings::{DB, EMAIL, RATE_LIMITER};") && !controller.contains("__"), "{controller}");
+        let lib = fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+        assert!(lib.starts_with("mod bindings;\nmod mailers;\nmod controllers;\n"), "{lib}");
+        assert!(lib.ends_with("use doko::RateLimiter;\n\ndoko::app!(App, objects: [RateLimiter]);\n"), "{lib}");
+        assert_eq!(out.todo.len(), 1, "only the deploy reminder: {:?}", out.todo);
+        assert!(auth(&dir).unwrap_err().contains("already"), "runs once");
+    }
+
+    #[test]
+    fn auth_reuses_bindings_and_reports_what_it_cannot_patch() {
+        let root = tmp("auth-existing");
+        fs::create_dir_all(root.0.join("migrations")).unwrap();
+        fs::write(root.0.join("migrations/0007_create_posts.sql"), "CREATE TABLE posts (id INTEGER);").unwrap();
+        fs::write(
+            root.0.join("doko.toml"),
+            "[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n[d1.MAIN]\ndatabase_name = \"x\"\n\
+             [do.LIMITS]\nclass_name = \"RateLimiter\"\n[do.SESSIONS]\nclass_name = \"SessionStore\"\n[wrangler.vars]\nA = \"b\"\n",
+        )
+        .unwrap();
+        let out = auth(&root.0).unwrap();
+        assert!(root.0.join("migrations/0008_create_users.sql").exists());
+        let controller = fs::read_to_string(root.0.join("src/controllers/auth.rs")).unwrap();
+        assert!(controller.contains("use crate::bindings::{MAIN, EMAIL, LIMITS};"), "{controller}");
+        let toml = fs::read_to_string(root.0.join("doko.toml")).unwrap();
+        assert!(toml.contains("[email.EMAIL]") && !toml.contains("[kv.SESSIONS]") && !toml.contains("[d1.DB]"), "{toml}");
+        assert!(crate::config::render(&toml).is_ok());
+        let todo = out.todo.join("\n");
+        assert!(todo.contains("APP_URL") && todo.contains("mod bindings;") && todo.contains("objects: [RateLimiter]"), "{todo}");
+
+        let users = tmp("auth-users");
+        fs::create_dir_all(users.0.join("migrations")).unwrap();
+        fs::write(users.0.join("migrations/0001_users.sql"), "CREATE TABLE users (id INTEGER);").unwrap();
+        fs::write(users.0.join("doko.toml"), "[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n").unwrap();
+        assert!(auth(&users.0).unwrap_err().contains("already creates a `users` table"));
+        assert!(!users.0.join("src").exists(), "nothing written");
+    }
+
+    #[test]
+    fn patches_lib_with_existing_objects() {
+        let (out, todo) = patch_lib("mod bindings;\nmod controllers;\nuse doko::Hooks;\ndoko::app!(App, objects: [Room]);\n");
+        let out = out.unwrap();
+        assert!(out.starts_with("mod mailers;\nmod bindings;"), "{out}");
+        assert!(out.contains("use doko::RateLimiter;\n\ndoko::app!(App, objects: [RateLimiter, Room]);"), "{out}");
+        assert_eq!(todo, ["merge `controllers::routes()` into Hooks::routes in src/lib.rs"]);
+        let done = "mod bindings;\nmod controllers;\nmod mailers;\nuse doko::RateLimiter;\nfn r() { controllers::routes() }\ndoko::app!(App, objects: [RateLimiter]);\n";
+        assert_eq!(patch_lib(done), (None, vec![]));
     }
 
     #[test]
