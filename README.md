@@ -25,7 +25,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Generators](#generators) | `doko new`, `generate controller \| job \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
-doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [PLAN.md](PLAN.md) for the roadmap.
+doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](ROADMAP.md) for the roadmap.
 
 ## Quick start
 
