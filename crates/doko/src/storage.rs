@@ -51,6 +51,10 @@ binding!(
     /// A `[queues.NAME]` binding from doko.toml.
     QueueBinding
 );
+binding!(
+    /// A `[do.NAME]` Durable Object binding from doko.toml.
+    DoBinding
+);
 
 pub(crate) fn missing(name: &str) -> impl FnOnce(worker::Error) -> Error + '_ {
     move |e| Error::internal(format!("binding `{name}` unavailable ({e}); is it in doko.toml, and did `doko config` run?"))

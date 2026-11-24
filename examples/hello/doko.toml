@@ -26,6 +26,10 @@ bucket_name = "doko-hello-files"
 [d1.DB]
 database_name = "doko-hello"
 
+# A Durable Object class, exported in src/lib.rs with doko::app!(App, objects: [RateLimiter]).
+[do.RATE_LIMITER]
+class_name = "RateLimiter"
+
 # A queue this worker sends jobs to and consumes (Hooks::jobs). Fields match wrangler's consumer settings.
 [queues.JOBS]
 queue = "doko-hello-jobs"

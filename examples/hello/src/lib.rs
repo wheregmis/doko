@@ -4,7 +4,7 @@ mod jobs;
 mod tasks;
 
 use doko::{
-    Ctx, Hooks, Jobs, Result, Tasks,
+    Ctx, Hooks, Jobs, RateLimit, RateLimiter, Result, RouterExt, Tasks,
     axum::{Json, Router, routing::get},
 };
 use serde::Deserialize;
@@ -23,6 +23,12 @@ impl Hooks for App {
             .route("/", get(index))
             .route("/health", get(health))
             .route("/token-length", get(token_length))
+            // 3 requests a minute per client IP, counted in a Durable Object; then 429.
+            .merge(
+                Router::new()
+                    .route("/limited", get(|| async { "ok" }))
+                    .rate_limit(RateLimit::new(bindings::RATE_LIMITER, "limited", 3, 60)),
+            )
             .merge(controllers::routes())
     }
 
@@ -48,4 +54,4 @@ async fn token_length(ctx: Ctx) -> Result<String> {
     Ok(ctx.secret("API_TOKEN")?.len().to_string())
 }
 
-doko::app!(App);
+doko::app!(App, objects: [RateLimiter]);

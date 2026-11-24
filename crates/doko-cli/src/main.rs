@@ -25,7 +25,8 @@ const BINDINGS_RS: &str = "src/bindings.rs";
 /// Regenerates wrangler.toml and src/bindings.rs, returning the rendered config output.
 fn write_config() -> Result<config::Output, String> {
     let src = fs::read_to_string("doko.toml").map_err(|e| format!("reading doko.toml: {e}"))?;
-    let out = config::render(&src)?;
+    // The existing wrangler.toml holds the Durable Object migration history, so commit it.
+    let out = config::render_over(&src, &fs::read_to_string("wrangler.toml").unwrap_or_default())?;
     write_if_changed("wrangler.toml", &out.wrangler_toml)?;
     if let Some(rs) = &out.bindings_rs {
         // Skip unchanged writes so cargo doesn't rebuild for nothing.

@@ -11,7 +11,7 @@ A batteries-included Rust framework for Cloudflare Workers.</p>
 
 A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
 
-doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs and cron all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron and Durable Objects all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
 
 **What's in the basket**
 
@@ -22,6 +22,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Storage](#storage-kv-r2-d1) | typed KV, R2 and D1 bindings, plus D1 migrations |
 | [Cache](#cache) | response caching with stale-while-revalidate and global tag purges |
 | [Jobs and cron](#background-jobs-and-cron-tasks) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
+| [Durable Objects](#durable-objects-and-rate-limits) | a `DurableObject` trait, typed stubs, and a per-route rate limiter built on them |
 | [Generators](#generators) | `doko new`, `generate controller \| job \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
@@ -206,6 +207,66 @@ ctx.enqueue(JOBS, &CountWords { id }).await?;          // or enqueue_in(JOBS, &j
 - **Cron triggers.** doko writes each env's cron triggers from its `[tasks]` schedules. On every trigger, it runs each task whose schedule matches.
 - **Testing a task locally:** `curl "localhost:8787/cdn-cgi/handler/scheduled?cron=0+3+*+*+*"`.
 
+## Durable Objects and rate limits
+
+```toml
+[do.COUNTER]              # binding name
+class_name = "Counter"    # the Rust type you export
+```
+
+```rust
+use doko::{DurableObject, Result, axum::{body::Body, extract::Request, http::Response, response::IntoResponse}};
+use worker::{Env, durable::State};
+
+struct Counter(State);
+
+impl DurableObject for Counter {
+    fn new(state: State, _env: Env) -> Self { Self(state) }
+
+    async fn fetch(&self, _req: Request) -> Result<Response<Body>> {
+        let n = self.0.storage().get::<u64>("n").await?.unwrap_or(0) + 1;
+        self.0.storage().put("n", n).await?;
+        Ok(n.to_string().into_response())
+    }
+    // Optional: async fn alarm(&self) -> Result<()>
+}
+
+doko::app!(App, objects: [Counter]);    // exports the class
+
+// In a handler. Each name is its own object; the URL's host is ignored.
+let res = ctx.durable(COUNTER)?.get("page:/home")?.fetch(Request::get("https://do/").body(Body::empty())?).await?;
+```
+
+- **Migrations.** Wrangler needs a migration for every new class. doko appends one to `wrangler.toml` when a `[do.*]` class first appears, and keeps the earlier ones, so **commit `wrangler.toml`**: it is the migration history.
+- **Removing a class** deletes everything its objects stored, so doko won't write that migration. It stops and prints the `deleted_classes` entry to append to `wrangler.toml` yourself.
+- New classes use SQLite-backed storage. WebSocket handlers are not wrapped yet.
+
+### Rate limits
+
+`RateLimiter` is a Durable Object that ships with doko. Bind and export it, then limit routes the same way you cache them:
+
+```toml
+[do.RATE_LIMITER]
+class_name = "RateLimiter"
+```
+
+```rust
+use doko::{RateLimit, RateLimiter, RouterExt};
+
+Router::new()
+    .route("/login", post(login))
+    // 5 requests per 60s per client IP. "login" keeps this count apart from other limits.
+    .rate_limit(RateLimit::new(RATE_LIMITER, "login", 5, 60))
+
+doko::app!(App, objects: [RateLimiter]);
+```
+
+- `.rate_limit()` applies to the routes added before it, and counts them together.
+- Over the limit, requests get a 429 `{"error": "too many requests"}` with `retry-after`.
+- The window is fixed and starts at a client's first request. Each client's counter lives in its own object and is deleted when the window ends.
+- The client is the `cf-connecting-ip` header. Local dev has none, so all local requests share one counter.
+- If the limiter can't be reached, requests get a 500 instead of passing unlimited.
+
 ## Integration tests
 
 `doko::test::App` runs your worker under `wrangler dev` (on a free port, with empty local state) and gives you an HTTP client. Enable it for tests only:
@@ -226,4 +287,4 @@ fn creates_notes() {
 }
 ```
 
-Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).
+Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).

@@ -15,6 +15,7 @@
 //! The app crate must also depend on `worker` directly: worker's `#[event]` macro expands to `::worker::` paths.
 
 mod cache;
+mod durable;
 mod error;
 mod jobs;
 mod log;
@@ -24,9 +25,12 @@ pub mod test;
 
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
+#[doc(hidden)]
+pub use durable::{object_alarm, serve_object};
+pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub};
 pub use error::{Error, Result};
 pub use jobs::{Job, Jobs, Tasks};
-pub use storage::{Bucket, D1Binding, Db, Kv, KvBinding, QueueBinding, R2Binding, Statement};
+pub use storage::{Bucket, D1Binding, Db, DoBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement};
 pub use worker;
 
 use std::{convert::Infallible, sync::Arc};
@@ -101,6 +105,11 @@ impl Ctx {
     /// A D1 database: `ctx.db(bindings::DB)?`.
     pub fn db(&self, binding: D1Binding) -> Result<Db> {
         Ok(Db(SendWrapper::new(self.env.d1(binding.0).map_err(storage::missing(binding.0))?)))
+    }
+
+    /// A Durable Object namespace: `ctx.durable(bindings::COUNTER)?.get("name")?`.
+    pub fn durable(&self, binding: DoBinding) -> Result<Durable> {
+        Ok(Durable(SendWrapper::new(self.env.durable_object(binding.0).map_err(storage::missing(binding.0))?)))
     }
 
     /// The edge cache (Cache API) for JSON values. For whole responses, see [`RouterExt::cache`].
@@ -202,8 +211,40 @@ pub async fn queue<H: Hooks>(batch: jobs::QueueBatch, env: Env, exec: Context) -
 pub use jobs::QueueBatch;
 
 /// Wires a [`Hooks`] type to the Workers fetch, scheduled and queue events.
+///
+/// `doko::app!(App, objects: [Counter, RateLimiter])` also exports those [`DurableObject`] types
+/// as classes. Each must be in scope by that name, which is its `class_name` in doko.toml.
 #[macro_export]
 macro_rules! app {
+    ($app:ty, objects: [$($object:ident),* $(,)?]) => {
+        $crate::app!($app);
+        $(
+            const _: () = {
+                // wasm-bindgen 0.2.130's struct derive ignores worker's `wasm_bindgen = ::worker::wasm_bindgen`
+                // and emits bare `wasm_bindgen::` paths, so the name must be in scope here.
+                #[allow(unused_imports)]
+                use ::worker::wasm_bindgen;
+
+                // The exported class. It shadows the app's type in this block; `self::` still names the app's.
+                #[::worker::durable_object(alarm)]
+                pub struct $object(self::$object);
+
+                impl ::worker::DurableObject for $object {
+                    fn new(state: ::worker::durable::State, env: ::worker::Env) -> Self {
+                        Self(<self::$object as $crate::DurableObject>::new(state, env))
+                    }
+
+                    async fn fetch(&self, req: ::worker::Request) -> ::worker::Result<::worker::Response> {
+                        $crate::serve_object(&self.0, req).await
+                    }
+
+                    async fn alarm(&self) -> ::worker::Result<::worker::Response> {
+                        $crate::object_alarm(&self.0).await
+                    }
+                }
+            };
+        )*
+    };
     ($app:ty) => {
         #[::worker::event(fetch)]
         async fn __doko_fetch(

@@ -6,6 +6,10 @@ compatibility_date = "2026-11-01"
 [build]
 command = "cargo install -q worker-build@^0.9 && worker-build --release"
 
+[[migrations]]
+new_sqlite_classes = ["RateLimiter"]
+tag = "v1"
+
 [triggers]
 crons = ["*/30 * * * *"]
 
@@ -39,6 +43,10 @@ max_batch_timeout = 1
 max_retries = 2
 dead_letter_queue = "doko-hello-jobs-dlq"
 
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
 [env.prod.triggers]
 crons = ["0 3 * * *"]
 
@@ -71,3 +79,7 @@ queue = "doko-hello-jobs"
 max_batch_timeout = 1
 max_retries = 2
 dead_letter_queue = "doko-hello-jobs-dlq"
+
+[[env.prod.durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
