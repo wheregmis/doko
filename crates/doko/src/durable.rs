@@ -7,15 +7,19 @@
 use std::time::Duration;
 
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Query, Request},
-    http::{Response, StatusCode, header::RETRY_AFTER},
+    http::{
+        Response, StatusCode,
+        header::{CONTENT_TYPE, RETRY_AFTER, UPGRADE},
+    },
     middleware::Next,
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use worker::{
-    Date, Env,
+    Date, Env, WebSocket, WebSocketIncomingMessage, WebSocketPair,
     durable::{ObjectNamespace, State},
     send::{SendFuture, SendWrapper},
 };
@@ -49,6 +53,54 @@ pub trait DurableObject: 'static {
     fn alarm(&self) -> impl Future<Output = Result<()>> {
         async { Ok(()) }
     }
+
+    /// Runs for each message on a socket opened with [`accept_websocket`]. The object may have
+    /// been asleep since the last one, so keep per-socket state in storage or in the socket's
+    /// attachment (`ws.serialize_attachment(..)`), not in fields.
+    fn websocket_message(&self, _ws: WebSocket, _message: WebSocketIncomingMessage) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
+
+    /// Runs when a client closes its socket.
+    fn websocket_close(&self, _ws: WebSocket, _code: usize, _reason: String, _was_clean: bool) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
+
+    /// Runs when a socket fails.
+    fn websocket_error(&self, _ws: WebSocket, _error: worker::Error) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
+}
+
+/// Opens a WebSocket in a [`DurableObject::fetch`]: the returned response hands the client its end,
+/// and the object's `websocket_*` methods get the events. A request that isn't a WebSocket upgrade gets a 426. Sockets hibernate, so an idle object
+/// costs nothing while its clients stay connected. `state.get_websockets()` lists the open ones.
+///
+/// ```ignore
+/// async fn fetch(&self, req: Request) -> Result<Response<Body>> {
+///     doko::accept_websocket(&self.0, &req)
+/// }
+///
+/// async fn websocket_message(&self, _ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+///     if let WebSocketIncomingMessage::String(text) = message {
+///         for peer in self.0.get_websockets() {
+///             peer.send_with_str(&text)?;
+///         }
+///     }
+///     Ok(())
+/// }
+/// ```
+///
+/// Route the client's upgrade request to the object unchanged:
+/// `ctx.durable(ROOMS)?.get(&room)?.fetch(req).await`.
+pub fn accept_websocket(state: &State, req: &Request) -> Result<Response<Body>> {
+    if !req.headers().get(UPGRADE).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket")) {
+        return Err(Error::new(StatusCode::UPGRADE_REQUIRED, "expected a WebSocket upgrade"));
+    }
+    let pair = WebSocketPair::new()?;
+    state.accept_web_socket(&pair.server);
+    // worker turns this extension into the response's `webSocket`.
+    Ok(Response::builder().status(StatusCode::SWITCHING_PROTOCOLS).extension(pair.client).body(Body::empty())?)
 }
 
 #[doc(hidden)]
@@ -60,8 +112,13 @@ pub async fn serve_object<O: DurableObject>(object: &O, req: worker::Request) ->
 
 #[doc(hidden)]
 pub async fn object_alarm<O: DurableObject>(object: &O) -> worker::Result<worker::Response> {
-    object.alarm().await.map_err(|e| worker::Error::RustError(e.to_string()))?;
+    object_result(object.alarm().await)?;
     worker::Response::empty()
+}
+
+#[doc(hidden)]
+pub fn object_result(result: Result<()>) -> worker::Result<()> {
+    result.map_err(|e| worker::Error::RustError(e.to_string()))
 }
 
 /// A `[do.NAME]` namespace, from [`Ctx::durable`].
@@ -93,7 +150,38 @@ impl Stub {
         .await
     }
 
-    /// The underlying stub, for RPC and sockets. Its futures are not `Send`.
+    /// Calls the object with JSON: POSTs `args` to `path` of its [`DurableObject::fetch`] and
+    /// reads the reply as `R`. A reply that isn't a success becomes an `Err` with its status,
+    /// and the message when the object answered with a doko [`Error`].
+    ///
+    /// ```ignore
+    /// let n: u64 = ctx.durable(COUNTER)?.get("home")?.call("add", &5).await?;
+    ///
+    /// // In the object:
+    /// async fn fetch(&self, req: Request) -> Result<Response<Body>> {
+    ///     match req.uri().path() {
+    ///         "/add" => {
+    ///             let Json(by): Json<u64> = Json::from_request(req, &()).await?;
+    ///             Ok(Json(self.add(by).await?).into_response())
+    ///         }
+    ///         _ => Err(Error::not_found()),
+    ///     }
+    /// }
+    /// ```
+    pub async fn call<A: Serialize, R: DeserializeOwned>(&self, path: &str, args: &A) -> Result<R> {
+        let uri = format!("https://doko.do/{}", path.trim_start_matches('/'));
+        let req = Request::post(uri).header(CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_vec(args)?))?;
+        let res = self.fetch(req).await?;
+        let status = res.status();
+        let body = to_bytes(res.into_body(), usize::MAX).await?;
+        if !status.is_success() {
+            let message = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(str::to_owned));
+            return Err(Error::new(status, message.unwrap_or_else(|| format!("object answered {status}"))));
+        }
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    /// The underlying stub, for JS RPC and TCP sockets. Its futures are not `Send`.
     pub fn raw(&self) -> &worker::Stub {
         &self.0
     }
@@ -106,21 +194,38 @@ pub struct RateLimit {
     name: &'static str,
     limit: u64,
     window_secs: u64,
+    key: Option<fn(&Request) -> Option<String>>,
 }
 
 impl RateLimit {
     /// At most `limit` requests per `window_secs` for each client IP. `binding` is a `[do.NAME]`
     /// whose class is [`RateLimiter`]. `name` keeps this count apart from other limits on the binding.
     pub fn new(binding: DoBinding, name: &'static str, limit: u64, window_secs: u64) -> Self {
-        Self { binding, name, limit, window_secs }
+        Self { binding, name, limit, window_secs, key: None }
+    }
+
+    /// Counts per `key(request)` instead of per client IP: an API key, a tenant, a user id.
+    /// Requests for which it returns `None` are counted by IP.
+    ///
+    /// ```ignore
+    /// RateLimit::new(RATE_LIMITER, "api", 100, 60)
+    ///     .key_by(|req| req.headers().get("x-api-key")?.to_str().ok().map(str::to_owned))
+    /// ```
+    ///
+    /// Only key on values the client can't choose freely, or it can dodge the limit by changing them.
+    pub fn key_by(mut self, key: fn(&Request) -> Option<String>) -> Self {
+        self.key = Some(key);
+        self
     }
 }
 
 pub(crate) async fn limit(rl: RateLimit, req: Request, next: Next) -> Response<Body> {
     let ctx = req.extensions().get::<Ctx>().cloned();
     // Cloudflare sets this header itself, so clients can't spoof it. It's absent in local dev.
-    let ip = req.headers().get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown").to_owned();
-    match check(rl, ctx, ip).await {
+    let ip = || req.headers().get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown").to_owned();
+    // The prefix keeps a custom key from ever landing on another client's IP counter.
+    let client = rl.key.and_then(|key| key(&req)).map(|k| format!("key:{k}")).unwrap_or_else(ip);
+    match check(rl, ctx, client).await {
         Ok(None) => next.run(req).await,
         Ok(Some(retry_after)) => {
             let mut res = Error::new(StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response();
@@ -133,9 +238,9 @@ pub(crate) async fn limit(rl: RateLimit, req: Request, next: Next) -> Response<B
 }
 
 /// `Some(retry-after)` when the client is over its limit.
-async fn check(rl: RateLimit, ctx: Option<Ctx>, ip: String) -> Result<Option<Option<axum::http::HeaderValue>>> {
+async fn check(rl: RateLimit, ctx: Option<Ctx>, client: String) -> Result<Option<Option<axum::http::HeaderValue>>> {
     let ctx = ctx.ok_or_else(|| Error::internal("rate limit: request has no Ctx"))?;
-    let stub = ctx.durable(rl.binding)?.get(&format!("{}:{ip}", rl.name))?;
+    let stub = ctx.durable(rl.binding)?.get(&format!("{}:{client}", rl.name))?;
     let uri = format!("https://doko.do/?limit={}&window_secs={}", rl.limit, rl.window_secs);
     let res = stub.fetch(Request::get(uri).body(Body::empty())?).await?;
     match res.status() {

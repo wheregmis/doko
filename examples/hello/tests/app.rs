@@ -1,6 +1,10 @@
 //! Runs the hello worker under `wrangler dev`: `cargo test -p hello -- --ignored` (needs Node).
 
-use std::time::{Duration, Instant};
+use std::{
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Value, json};
 
@@ -42,10 +46,104 @@ fn rate_limits() {
     assert_eq!(res.status, 429, "{}", res.body);
     assert_eq!(res.json::<Value>(), json!({ "error": "too many requests" }));
     assert_eq!(app.get("/health").status, 200, "other routes are not limited");
+
+    // `key_by` counts each API key on its own, apart from the IP count above.
+    let keyed = |key: &str| app.send("GET", "/limited", &[("x-api-key", key)], "").status;
+    assert_eq!([keyed("a"), keyed("a"), keyed("a"), keyed("a")], [200, 200, 200, 429]);
+    assert_eq!(keyed("b"), 200);
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn cache_varies_and_files_stream() {
+    let app = doko::test::App::start(&[]);
+
+    // One cached copy per accept-language value.
+    let language = |l: &str| app.send("GET", "/language", &[("accept-language", l)], "");
+    let de = language("de");
+    assert_eq!((de.body.as_str(), de.header("x-doko-cache"), de.header("vary")), ("de", Some("MISS"), Some("accept-language")));
+    assert_eq!(language("en").body, "en", "another language is not served the German copy");
+    let started = Instant::now();
+    loop {
+        // The first response is stored in the background, so the hit can lag it.
+        let again = language("de");
+        assert_eq!(again.body, "de");
+        if again.header("x-doko-cache") == Some("HIT") {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "never cached");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // A small upload is one put; one larger than a part (8 MiB) is a multipart upload.
+    for (key, size) in [("small.txt", 5), ("large.txt", 9 * 1024 * 1024)] {
+        let path = format!("/files/{key}");
+        let put = app.send("PUT", &path, &[("content-type", "text/plain")], &"x".repeat(size));
+        assert_eq!(put.status, 201, "{}", put.body);
+        let got = app.get(&path);
+        assert_eq!((got.status, got.body.len(), got.header("content-type")), (200, size, Some("text/plain")));
+    }
+}
+
+/// A minimal WebSocket client: the handshake, then one text frame each way.
+fn websocket_roundtrip(app: &doko::test::App, path: &str, text: &str) -> String {
+    let addr = app.url().trim_start_matches("http://");
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains(" 101 "), "no upgrade: {line}");
+    while line != "\r\n" {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+    }
+    // Client frames are masked; an all-zero mask leaves the payload readable.
+    let mut frame = vec![0x81, 0x80 | text.len() as u8, 0, 0, 0, 0];
+    frame.extend_from_slice(text.as_bytes());
+    stream.write_all(&frame).unwrap();
+    let mut head = [0; 2];
+    reader.read_exact(&mut head).unwrap();
+    assert_eq!(head[0], 0x81, "expected one text frame");
+    let mut payload = vec![0; head[1] as usize];
+    reader.read_exact(&mut payload).unwrap();
+    String::from_utf8(payload).unwrap()
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn websockets() {
+    let app = doko::test::App::start(&[]);
+    assert_eq!(websocket_roundtrip(&app, "/rooms/lobby", "hello room"), "hello room");
+    assert_eq!(app.get("/rooms/lobby").status, 426, "a plain GET is not an upgrade");
+    // Stub::call: a JSON round trip with the room's object.
+    let members = app.get("/rooms/lobby/members");
+    // 0 or 1: the test's socket was dropped without a close frame, so the room may still list it.
+    assert!(members.status == 200 && members.json::<u64>() <= 1, "{}", members.body);
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn times_out_slow_requests() {
+    let app = doko::test::App::start(&[]);
+    let started = Instant::now();
+    let res = app.get("/slow");
+    assert_eq!((res.status, res.json::<Value>()), (504, json!({ "error": "gateway timeout" })));
+    // request_timeout_secs = 10 in doko.toml; the handler itself would take a minute.
+    assert!((9..30).contains(&started.elapsed().as_secs()), "{:?}", started.elapsed());
 }
 
 /// Signed by the throwaway private key whose public half is JWT_PUBLIC_KEY in .dev.vars; expires in 2100.
-const RS256_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NywidXNlcm5hbWUiOiJyc2EtdXNlciIsImV4cCI6NDEwMjQ0NDgwMH0.EESzC-7209pg2ekFVlQBFMzhXkw8ZAM_L_zeWrkZllsSHSWZEXHMCaJ8o2jV7skWPiE_0mNY40C-h6WtOPrPWoxhxnOj__gxzbjxCwwCd79ijeDAGdGTHLxi8EX-F7jzLAvnPKZeKMEAQ8rKiGHoZmUmJt0gUj93FAF08eyqvMVQ03DqVeTFpM11ssk2vvnY_rBbDFzE9GpFPt3o9fJneFePYVKa4qqLfZD1zdbfHGmmiAeNXROgrcfw_RQZnLceH22shM86_bKg9GIAatBHIw-xi_dsx4VZx7toIuYf7UYR5tTDTrlhSNgPQSFt2rngBxTUwhm1DSlZQB9jPdYXjw";
+/// Its `iss` is the `jwt_issuer` in doko.toml.
+const RS256_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NywidXNlcm5hbWUiOiJyc2EtdXNlciIsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiZG9rby1oZWxsbyJ9.Vl_jVmCm--8JGDHUtD2SdYcm76oENTwbqeV_X61j2SHI1XShlF4oyTiR8e50h_Rx37WPiBlV6nBXo1aYf5Zke5BeTXbz8jkKRakVBBre4K-n5KvIMlxphGt7jqDhpRuR_af6HypKkAYfXGoX3i1uJjCZZEABgbt5GVWqbFM9wxqxlRsqCk5YV0EnnrcwT5VrJiNzxdhAv3qS9eQYdd6Fi7mD1RcNUV268sxIFLa5fLI8yG8SJTA3EBjJPF9TqrW0uHFUKGhjBq4aLeyPn8GkebbbtLzJK-tA_xOgMpw4rg5SNJpZ3JNkocXG5XJQa15fWou_0FayfeFVKx5JEOoBjA";
+/// The same, from an issuer this app does not trust.
+const RS256_WRONG_ISSUER: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NywidXNlcm5hbWUiOiJyc2EtdXNlciIsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoic29tZW9uZS1lbHNlIn0.pojD6cuV4EGm8ZEp0S952L0tOsAGDzvEb0e0QSMlMlFqM9tKtGqLVKL339QPQOPxwJLOH7r2DJpjyuBdhlTG4yssEyR0n5U9W4-WlL03wApqYprV5HSpc4Or5YA8aOsx7-OdcxURXAyFpJgEnxILHbQLVkxkZAlA3RYFxc5mGQnn0qx7HxFkk3Tn2Lvv9wqcICCNAwACrB43F8rcvTb8Fz5f6htEByWWiaZmfbovQfpt1YIYF3LOWBtjd7mVNQ15SmfQhKUe70GB4uPxI6syo4W2Z_RmbW7_svBGjlmo9LIf0jF30az5nIhbEF8UR-qYeGxcggN72XN0Cs0VHKH6Mw";
 
 #[test]
 #[ignore = "starts wrangler dev"]
@@ -64,13 +162,15 @@ fn auth() {
     assert_eq!(login.status, 200, "{}", login.body);
     let set_cookie = login.header("set-cookie").expect("login sets a cookie");
     assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("Secure"), "{set_cookie}");
+    // The cookie name and lifetime come from [auth] in doko.toml.
+    assert!(set_cookie.starts_with("hello_session=") && set_cookie.contains("Max-Age=86400"), "{set_cookie}");
     let cookie = set_cookie.split(';').next().unwrap();
 
     // The session cookie opens the protected route; a tampered one does not.
     let me = app.send("GET", "/me", &[("cookie", cookie)], "");
     assert_eq!((me.status, me.json::<Value>()["username"].as_str()), (200, Some("ada")), "{}", me.body);
     assert_eq!(app.send("GET", "/me", &[("cookie", &format!("{cookie}x"))], "").status, 401);
-    assert_eq!(app.send("GET", "/me", &[("cookie", "doko_session=forged.c2ln")], "").status, 401);
+    assert_eq!(app.send("GET", "/me", &[("cookie", "hello_session=forged.c2ln")], "").status, 401);
 
     // The JWT from login works as a bearer token, and so does an RS256 token from another issuer.
     let token = login.json::<Value>()["token"].as_str().unwrap().to_owned();
@@ -79,7 +179,20 @@ fn auth() {
     assert_eq!(bearer(RS256_TOKEN).json::<Value>()["username"], "rsa-user");
     assert_eq!(bearer(&format!("{token}x")).status, 401);
     assert_eq!(bearer(&format!("{RS256_TOKEN}x")).status, 401);
+    assert_eq!(bearer(RS256_WRONG_ISSUER).status, 401, "a valid signature from the wrong `iss` is refused");
     assert_eq!(app.get("/api/me").status, 401);
+
+    // Roles: `/admin` needs a login at all (401), and then the admin role (403).
+    assert_eq!(app.get("/admin").status, 401);
+    assert_eq!(app.send("GET", "/admin", &[("cookie", cookie)], "").status, 403);
+    assert_eq!(bearer(&token).status, 200);
+    assert_eq!(app.send("GET", "/admin", &[("authorization", &format!("Bearer {token}"))], "").status, 403);
+    let admin = json!({ "username": "admin", "password": "correct horse" });
+    assert_eq!(app.post_json("/signup", &admin).status, 201);
+    let admin_login = app.post_json("/login", &admin);
+    let admin_cookie = admin_login.header("set-cookie").unwrap().split(';').next().unwrap().to_owned();
+    let welcomed = app.send("GET", "/admin", &[("cookie", &admin_cookie)], "");
+    assert_eq!((welcomed.status, welcomed.body.as_str()), (200, "welcome, admin"));
 
     // Logout ends the session on the server, so the old cookie stops working.
     let logout = app.send("POST", "/logout", &[("cookie", cookie)], "");

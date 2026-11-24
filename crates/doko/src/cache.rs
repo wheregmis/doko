@@ -4,6 +4,7 @@
 //! - [`RouterExt::cache`] caches whole GET responses, with stale-while-revalidate and tags.
 //!
 //! The Cache API is per data center, and is a no-op on `*.workers.dev`, so production needs a custom domain.
+//! [`Cache::tier`] adds KV behind the value cache, which is global and works everywhere.
 //! Tags make purges global: each tag has a version in KV, and that version is part of the cache key,
 //! so [`Cache::purge_tag`] reaches every data center once KV propagates (up to ~60s).
 
@@ -14,14 +15,14 @@ use axum::{
     body::{Body, HttpBody, to_bytes},
     extract::Request,
     http::{
-        HeaderValue, Method, Response, StatusCode, Uri,
-        header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE},
+        HeaderMap, HeaderValue, Method, Response, StatusCode, Uri,
+        header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE, VARY},
     },
     middleware::{self, Next},
     response::IntoResponse,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 // worker::Cache is !Send, so each call creates it inside a SendFuture.
 use worker::{Date, console_error, send::SendFuture};
 
@@ -34,33 +35,67 @@ const STATUS: &str = "x-doko-cache";
 const STORED_AT: &str = "x-doko-stored-at";
 // The stored copy's cache-control drives Cache API expiry; the handler's own value is kept here.
 const ORIGINAL_CC: &str = "x-doko-cache-control";
+// Kept off the stored copy for the same reason as the policy's `Vary`: see `respond`.
+const ORIGINAL_VARY: &str = "x-doko-vary";
 
 /// Key-value cache on the Cache API, from [`Ctx::cache`]. Values are JSON.
 pub struct Cache {
     ctx: Ctx,
+    kv: Option<KvBinding>,
 }
 
 impl Cache {
     pub(crate) fn new(ctx: Ctx) -> Self {
-        Self { ctx }
+        Self { ctx, kv: None }
+    }
+
+    /// Adds `kv` as a second tier: `ctx.cache().tier(CACHE)`. Values are written to both, and a
+    /// miss in this data center's cache is answered from KV, so a value computed anywhere is
+    /// reused everywhere. KV keeps a value for at least 60 seconds, and reads cost a KV operation.
+    pub fn tier(mut self, kv: KvBinding) -> Self {
+        self.kv = Some(kv);
+        self
     }
 
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         let url = format!("{DATA_ORIGIN}{}", encode(key));
-        SendFuture::new(async move {
-            match worker::Cache::default().get(url.as_str(), true).await? {
-                Some(mut res) => Ok(Some(res.json::<T>().await?)),
-                None => Ok(None),
+        let local: Result<Option<T>> = SendFuture::new({
+            let url = url.clone();
+            async move {
+                match worker::Cache::default().get(url.as_str(), true).await? {
+                    Some(mut res) => Ok(Some(res.json::<T>().await?)),
+                    None => Ok(None),
+                }
             }
         })
-        .await
+        .await;
+        let (None, Some(kv)) = (local.as_ref().ok().and_then(Option::as_ref), self.kv) else {
+            return local;
+        };
+        // Stored with its expiry, so the copy made here doesn't outlive the original.
+        let Some((expires_ms, value)) = self.ctx.kv(kv)?.get::<(u64, Value)>(&kv_key(key)).await? else {
+            return Ok(None);
+        };
+        let ttl_secs = expires_ms.saturating_sub(Date::now().as_millis()) / 1000;
+        if ttl_secs == 0 {
+            return Ok(None);
+        }
+        let body = value.to_string();
+        self.ctx.wait_until(async move {
+            // Best effort: without it, the next read asks KV again.
+            let _ = put_json_entry(url, body, ttl_secs).await;
+        });
+        Ok(Some(serde_json::from_value(value)?))
     }
 
     pub async fn put<T: Serialize>(&self, key: &str, value: &T, ttl_secs: u64) -> Result<()> {
         let url = format!("{DATA_ORIGIN}{}", encode(key));
-        let body = serde_json::to_string(value)?;
-        SendFuture::new(put_json_entry(url, body, ttl_secs)).await?;
-        Ok(())
+        let value = serde_json::to_value(value)?;
+        SendFuture::new(put_json_entry(url, value.to_string(), ttl_secs)).await?;
+        match self.kv {
+            Some(kv) => put_kv(&self.ctx, kv, key, &value, ttl_secs).await,
+            None => Ok(()),
+        }
     }
 
     /// The cached value, or `compute`'s result, cached in the background for `ttl_secs`.
@@ -82,8 +117,8 @@ impl Cache {
         if ttl_secs == 0 {
             return Ok(value);
         }
-        let body = match serde_json::to_string(&value) {
-            Ok(b) => b,
+        let json = match serde_json::to_value(&value) {
+            Ok(v) => v,
             Err(e) => {
                 console_error!(
                     "{}",
@@ -93,28 +128,49 @@ impl Cache {
             }
         };
         let url = format!("{DATA_ORIGIN}{}", encode(key));
+        let (ctx, kv, key) = (self.ctx.clone(), self.kv, key.to_owned());
         self.ctx.wait_until(async move {
-            if let Err(e) = put_json_entry(url, body, ttl_secs).await {
+            let local = put_json_entry(url, json.to_string(), ttl_secs).await.map_err(crate::Error::from);
+            let global = match kv {
+                Some(kv) => put_kv(&ctx, kv, &key, &json, ttl_secs).await,
+                None => Ok(()),
+            };
+            for e in [local, global].into_iter().filter_map(Result::err) {
                 console_error!(
                     "{}",
-                    json!({ "level": "error", "component": "cache", "op": "put", "error": e.to_string() })
+                    json!({ "level": "error", "component": "cache", "op": "put", "error": e.message() })
                 );
             }
         });
         Ok(value)
     }
 
-    /// Removes `key` in this data center only. Use a short TTL, or tags, for global invalidation.
+    /// Removes `key` from this data center's cache, and from the KV [`tier`](Self::tier) if there
+    /// is one. Other data centers keep their copies until the TTL, so for values that must
+    /// disappear everywhere at once, use a short TTL or tags.
     pub async fn delete(&self, key: &str) -> Result<()> {
         let url = format!("{DATA_ORIGIN}{}", encode(key));
         SendFuture::new(async move { worker::Cache::default().delete(url.as_str(), true).await }).await?;
-        Ok(())
+        match self.kv {
+            Some(kv) => self.ctx.kv(kv)?.delete(&kv_key(key)).await,
+            None => Ok(()),
+        }
     }
 
     /// Invalidates every response cached under `tag`, in all data centers.
     pub async fn purge_tag(&self, kv: KvBinding, tag: &str) -> Result<()> {
         self.ctx.kv(kv)?.put(&tag_key(tag), &next_tag_version()).await
     }
+}
+
+fn kv_key(key: &str) -> String {
+    format!("doko:cache:{key}")
+}
+
+async fn put_kv(ctx: &Ctx, kv: KvBinding, key: &str, value: &Value, ttl_secs: u64) -> Result<()> {
+    let expires_ms = Date::now().as_millis().saturating_add(ttl_secs.saturating_mul(1000));
+    // KV's shortest TTL is 60s; the stored expiry still ends the value on time.
+    ctx.kv(kv)?.put_ttl(&kv_key(key), &(expires_ms, value), ttl_secs.max(60)).await
 }
 
 async fn put_json_entry(url: String, body: String, ttl_secs: u64) -> worker::Result<()> {
@@ -142,12 +198,13 @@ pub struct Policy {
     ttl: u64,
     stale: u64,
     tags: Option<(KvBinding, Vec<&'static str>)>,
+    vary: Vec<&'static str>,
 }
 
 impl Policy {
     /// Serve from cache for `secs` after a response is stored.
     pub fn ttl(secs: u64) -> Self {
-        Self { ttl: secs, stale: 0, tags: None }
+        Self { ttl: secs, stale: 0, tags: None, vary: Vec::new() }
     }
 
     /// After the TTL, keep serving the stale copy for `secs` more while refreshing it in the background.
@@ -161,22 +218,35 @@ impl Policy {
         self.tags = Some((kv, tags.to_vec()));
         self
     }
+
+    /// Keep a separate copy per value of these request headers, e.g. `&["accept-language"]`, and
+    /// name them in the response's `Vary`. Every distinct value is its own cache entry, so pick
+    /// headers with few values: not `cookie` or `user-agent`.
+    pub fn vary(mut self, headers: &[&'static str]) -> Self {
+        self.vary = headers.to_vec();
+        self
+    }
 }
 
 /// Adds `.cache(policy)`, `.rate_limit(limit)` and `.require_auth()` to routers.
 pub trait RouterExt {
     /// Caches successful GET responses of the routes added so far. Requests with `Authorization`,
-    /// and responses that are not 200, set cookies, are `private`/`no-store`, or stream, are never cached.
+    /// and responses that are not 200, set cookies, are `private`/`no-store`, stream, or carry a
+    /// `Vary` header naming something the policy's [`vary`](Policy::vary) doesn't, are never cached.
     /// Responses carry `x-doko-cache: HIT | STALE | MISS | BYPASS`.
     fn cache(self, policy: Policy) -> Self;
 
-    /// Limits requests per client IP to the routes added so far, counted together. Over the limit,
+    /// Limits requests per client IP (or [`RateLimit::key_by`](crate::RateLimit::key_by)) to the routes added so far, counted together. Over the limit,
     /// they get a 429 with `retry-after`. If the limiter itself fails, they get a 500.
     fn rate_limit(self, limit: crate::RateLimit) -> Self;
 
     /// Answers 401 on the routes added so far unless the request has a session (see
     /// [`auth::Session`](crate::auth::Session)) or a valid `Authorization: Bearer` JWT.
     fn require_auth(self) -> Self;
+
+    /// Like [`require_auth`](Self::require_auth), and answers 403 unless the session value or the
+    /// JWT claims name `role`, as `"role": "admin"` or `"roles": ["admin", ..]`.
+    fn require_role(self, role: &'static str) -> Self;
 }
 
 impl RouterExt for Router<Ctx> {
@@ -189,17 +259,34 @@ impl RouterExt for Router<Ctx> {
     }
 
     fn require_auth(self) -> Self {
-        self.route_layer(middleware::from_fn(crate::auth::require))
+        self.route_layer(middleware::from_fn(|req: Request, next: Next| crate::auth::require(None, req, next)))
+    }
+
+    fn require_role(self, role: &'static str) -> Self {
+        self.route_layer(middleware::from_fn(move |req: Request, next: Next| crate::auth::require(Some(role), req, next)))
     }
 }
 
 async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
+    // Not stored with the response: the Cache API would then match on those request headers itself.
+    let vary = HeaderValue::from_str(&policy.vary.join(", ")).ok().filter(|v| !v.is_empty());
+    let mut res = lookup(policy, req, next).await;
+    // A handler that already names all of them in its own `Vary` needs nothing added.
+    if let Some(vary) = vary
+        && !vary_covered(vary.to_str().unwrap_or("*"), &vary_names(res.headers()))
+    {
+        res.headers_mut().append(VARY, vary);
+    }
+    res
+}
+
+async fn lookup(policy: Policy, req: Request, next: Next) -> Response<Body> {
     let ctx = req.extensions().get::<Ctx>().cloned();
     let (Some(ctx), true, false) = (ctx, req.method() == Method::GET, req.headers().contains_key(AUTHORIZATION)) else {
         return mark(next.run(req).await, "BYPASS");
     };
     let uri = req.uri().clone();
-    let key = match cache_key(&ctx, &policy, &uri).await {
+    let key = match cache_key(&ctx, &policy, &uri, req.headers()).await {
         Ok(k) => k,
         Err(e) => {
             console_error!(
@@ -257,8 +344,22 @@ async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
     }
 }
 
-fn restore_headers(headers: &mut axum::http::HeaderMap) {
+/// Every name in the response's `Vary` headers.
+fn vary_names(headers: &HeaderMap) -> Vec<&str> {
+    headers.get_all(VARY).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).map(str::trim).collect()
+}
+
+/// Whether every header a `Vary` value names is one of `known`. `Vary: *` never is.
+fn vary_covered(vary: &str, known: &[&str]) -> bool {
+    let mut names = vary.split(',').map(str::trim).filter(|n| !n.is_empty());
+    names.all(|name| known.iter().any(|k| k.eq_ignore_ascii_case(name)))
+}
+
+fn restore_headers(headers: &mut HeaderMap) {
     headers.remove(STORED_AT);
+    if let Some(vary) = headers.remove(ORIGINAL_VARY) {
+        headers.insert(VARY, vary);
+    }
     headers.remove(CACHE_CONTROL);
     if let Some(cc) = headers.remove(ORIGINAL_CC) {
         headers.insert(CACHE_CONTROL, cc);
@@ -280,7 +381,11 @@ async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body
     let max_age = policy.ttl.saturating_add(policy.stale);
     let cc = res.headers().get(CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");
     let size = res.body().size_hint().exact();
+    // A handler's own `Vary` says its response depends on those request headers. The cache key
+    // only tells requests apart by the policy's `vary` headers, so anything else can't be cached.
+    let vary = vary_names(res.headers()).join(", ");
     let cacheable = max_age > 0
+        && vary_covered(&vary, &policy.vary)
         && res.status() == StatusCode::OK
         && !res.headers().contains_key(SET_COOKIE)
         && !cache_control_forbids_caching(cc)
@@ -296,6 +401,9 @@ async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body
     let h = stored.headers_mut();
     if let Some(original) = h.remove(CACHE_CONTROL) {
         h.insert(ORIGINAL_CC, original);
+    }
+    if h.remove(VARY).is_some() {
+        h.insert(ORIGINAL_VARY, HeaderValue::from_str(&vary).ok()?);
     }
     let cache_control = HeaderValue::from_str(&format!("public, max-age={max_age}")).expect("digits are valid header bytes");
     h.insert(CACHE_CONTROL, cache_control);
@@ -316,12 +424,18 @@ async fn put(key: String, stored: Response<Body>) {
     }
 }
 
-/// The request URL, plus the current version of each tag, so bumping a tag changes every key under it.
-async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
+/// The request URL, plus the request's `vary` header values, plus the current version of each tag,
+/// so bumping a tag changes every key under it.
+async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri, headers: &HeaderMap) -> Result<String> {
     let mut key = match uri.scheme() {
         Some(_) => uri.to_string(),
         None => format!("https://doko.local{}", uri.path_and_query().map_or("/", |p| p.as_str())),
     };
+    if !policy.vary.is_empty() {
+        key.push(if key.contains('?') { '&' } else { '?' });
+        key.push_str("__doko_vary=");
+        key.push_str(&vary_key(&policy.vary, headers));
+    }
     if let Some((kv, tags)) = &policy.tags
         && !tags.is_empty()
     {
@@ -335,6 +449,12 @@ async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
         key.push_str(&versions.join("."));
     }
     Ok(key)
+}
+
+/// The values of the `vary` headers, encoded so that no header value can imitate another's.
+fn vary_key(vary: &[&str], headers: &HeaderMap) -> String {
+    let value = |name: &&str| encode(headers.get(*name).and_then(|v| v.to_str().ok()).unwrap_or(""));
+    vary.iter().map(value).collect::<Vec<_>>().join(",")
 }
 
 fn mark(mut res: Response<Body>, status: &'static str) -> Response<Body> {
@@ -379,6 +499,30 @@ mod tests {
         assert_eq!(encode("notes:all"), "notes%3Aall");
         assert_eq!(encode("a b/ü"), "a%20b%2F%C3%BC");
         assert_eq!(encode("ok-_.~9"), "ok-_.~9");
+    }
+
+    #[test]
+    fn keys_vary_headers_apart() {
+        let mut h = HeaderMap::new();
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), ",");
+        h.insert("accept-language", HeaderValue::from_static("de,en"));
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), "de%2Cen,", "a comma in a value can't split the key");
+        h.insert("x-plan", HeaderValue::from_static("pro"));
+        assert_eq!(vary_key(&["accept-language", "x-plan"], &h), "de%2Cen,pro");
+    }
+
+    #[test]
+    fn only_caches_a_vary_the_policy_covers() {
+        assert!(vary_covered("", &[]), "no Vary, nothing to cover");
+        assert!(vary_covered("Accept-Language", &["accept-language", "x-plan"]));
+        assert!(vary_covered("x-plan, accept-language", &["accept-language", "x-plan"]));
+        assert!(!vary_covered("accept-language, cookie", &["accept-language"]));
+        assert!(!vary_covered("accept-language", &[]));
+        assert!(!vary_covered("*", &["accept-language"]));
+        let mut h = HeaderMap::new();
+        h.append(VARY, HeaderValue::from_static("a, b"));
+        h.append(VARY, HeaderValue::from_static("c"));
+        assert_eq!(vary_names(&h), ["a", "b", "c"]);
     }
 
     #[test]

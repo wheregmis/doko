@@ -10,6 +10,7 @@ use axum::{
         header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG},
     },
 };
+use futures_util::StreamExt;
 use serde::{Serialize, de::DeserializeOwned};
 use worker::{
     KvStore, ResponseBody,
@@ -96,6 +97,9 @@ impl Kv {
     }
 }
 
+/// The part size of streamed uploads. R2 needs at least 5 MiB, and equal parts except the last.
+const PART_BYTES: usize = 8 * 1024 * 1024;
+
 /// An R2 bucket.
 pub struct Bucket(pub(crate) SendWrapper<worker::Bucket>);
 
@@ -134,18 +138,66 @@ impl Bucket {
         .await
     }
 
-    // shortcut: buffers the whole upload in memory (128 MB worker limit); stream via raw() for large files.
+    /// Stores bytes already in memory. For request bodies, use [`put_stream`](Self::put_stream).
     pub async fn put(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<()> {
         let meta = worker::HttpMetadata { content_type: Some(content_type.to_owned()), ..Default::default() };
         SendFuture::new(self.0.put(key, bytes).http_metadata(meta).execute()).await?;
         Ok(())
     }
 
+    /// Stores a body as it arrives, holding at most 8 MiB of it in memory: take the handler's
+    /// `body: Body` and pass it on. Larger bodies go up as an R2 multipart upload, a part at a
+    /// time; if the body fails midway, nothing is stored.
+    pub async fn put_stream(&self, key: &str, body: Body, content_type: &str) -> Result<()> {
+        let meta = worker::HttpMetadata { content_type: Some(content_type.to_owned()), ..Default::default() };
+        SendFuture::new(async {
+            let mut chunks = body.into_data_stream();
+            let mut buf = Vec::new();
+            let mut upload = None;
+            let streamed: Result<()> = async {
+                while let Some(chunk) = chunks.next().await {
+                    buf.extend_from_slice(&chunk?);
+                    while buf.len() >= PART_BYTES {
+                        let rest = buf.split_off(PART_BYTES);
+                        let part = std::mem::replace(&mut buf, rest);
+                        if upload.is_none() {
+                            let started = self.0.create_multipart_upload(key).http_metadata(meta.clone()).execute().await?;
+                            upload = Some((started, Vec::new()));
+                        }
+                        let (upload, parts) = upload.as_mut().expect("just started");
+                        parts.push(upload.upload_part(parts.len() as u16 + 1, part).await?);
+                    }
+                }
+                if let Some((upload, parts)) = &mut upload
+                    && !buf.is_empty()
+                {
+                    parts.push(upload.upload_part(parts.len() as u16 + 1, std::mem::take(&mut buf)).await?);
+                }
+                Ok(())
+            }
+            .await;
+            match (streamed, upload) {
+                // It all fit in one part: a plain put.
+                (Ok(()), None) => self.0.put(key, buf).http_metadata(meta).execute().await.map(|_| ())?,
+                (Ok(()), Some((upload, parts))) => upload.complete(parts).await.map(|_| ())?,
+                (Err(e), upload) => {
+                    if let Some((upload, _)) = upload {
+                        // Otherwise the parts sent so far would be stored, and billed, until they expire.
+                        let _ = upload.abort().await;
+                    }
+                    return Err(e);
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         Ok(SendFuture::new(self.0.delete(key)).await?)
     }
 
-    /// The underlying bucket, for list, multipart and streaming uploads. Its futures are not `Send`.
+    /// The underlying bucket, for list, ranges and resumable multipart uploads. Its futures are not `Send`.
     pub fn raw(&self) -> &worker::Bucket {
         &self.0
     }

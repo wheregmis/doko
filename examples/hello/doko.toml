@@ -1,6 +1,11 @@
 [app]
 name = "doko-hello"
 compatibility_date = "2026-11-01"
+# Requests that take longer get a 504. Without it, only the platform's limits apply.
+request_timeout_secs = 10
+# To rename or delete a Durable Object class (deleting destroys its stored data):
+# renamed_classes = [{ from = "Room", to = "ChatRoom" }]
+# deleted_classes = ["Room"]
 
 # Read at runtime with ctx.config::<Config>(). [env.<name>.config] is deep-merged over it.
 [config]
@@ -31,14 +36,27 @@ bucket_name = "doko-hello-files"
 [d1.DB]
 database_name = "doko-hello"
 
-# A Durable Object class, exported in src/lib.rs with doko::app!(App, objects: [RateLimiter]).
+# Optional doko::auth settings; every key has a default. [env.<name>.auth] overrides per key.
+[auth]
+session_ttl_secs = 86400          # default: 7 days
+session_cookie = "hello_session"  # default: doko_session
+jwt_issuer = "doko-hello"         # added to the tokens auth::sign issues, required of every token
+# jwt_audience = "hello-api"
+# jwks_url = "https://issuer.example/.well-known/jwks.json"   # RS256 keys by `kid`, instead of JWT_PUBLIC_KEY
+
+# A Durable Object class, exported in src/lib.rs with doko::app!(App, objects: [RateLimiter, Room]).
 [do.RATE_LIMITER]
 class_name = "RateLimiter"
+
+# One object per chat room, holding its WebSockets: src/controllers/rooms.rs.
+[do.ROOMS]
+class_name = "Room"
 
 # Sends mail: ctx.mail(EMAIL). Under `doko dev` mail is logged instead of sent.
 [email.EMAIL]
 
 # A queue this worker sends jobs to and consumes (Hooks::jobs). Fields match wrangler's consumer settings.
+# Add `consume = false` when another worker consumes the queue and this one only sends to it.
 [queues.JOBS]
 queue = "doko-hello-jobs"
 max_batch_timeout = 1

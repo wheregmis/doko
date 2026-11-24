@@ -20,11 +20,13 @@ struct Credentials {
     password: String,
 }
 
-/// What the session and the JWT carry.
+/// What the session and the JWT carry. `require_role` reads `role` from it.
 #[derive(Serialize, Deserialize)]
 struct User {
     id: i64,
     username: String,
+    #[serde(default)]
+    role: String,
 }
 
 #[derive(Deserialize)]
@@ -43,7 +45,9 @@ pub fn routes() -> Router<Ctx> {
         .route("/logout", post(logout))
         // `Claims` answers 401 itself when the bearer token is missing or invalid.
         .route("/api/me", get(api_me));
-    Router::new().route("/me", get(me)).require_auth().merge(public)
+    // 401 without a session or token, 403 unless it carries the role.
+    let admin = Router::new().route("/admin", get(|| async { "welcome, admin" })).require_role("admin");
+    Router::new().route("/me", get(me)).require_auth().merge(admin).merge(public)
 }
 
 async fn signup(ctx: Ctx, Json(c): Json<Credentials>) -> Result<StatusCode> {
@@ -65,7 +69,9 @@ async fn login(ctx: Ctx, session: Session, Json(c): Json<Credentials>) -> Result
     if !auth::verify_password(&c.password, &row.password_hash).await? {
         return Err(Error::unauthorized());
     }
-    let user = User { id: row.id, username: row.username };
+    // A real app stores roles with the user; here the name decides.
+    let role = if row.username == "admin" { "admin" } else { "member" }.to_owned();
+    let user = User { id: row.id, username: row.username, role };
     let token = auth::sign(&ctx, &user, 60 * 60).await?;
     Ok((session.set(&user).await?, Json(json!({ "token": token }))))
 }
