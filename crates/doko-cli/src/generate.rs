@@ -38,6 +38,12 @@ pub fn jobs() -> Jobs {
 }
 ";
 
+const MODELS_MOD: &str = "\
+//! Models: one file per table. `doko generate scaffold <name> ..` adds to this file; keep the doko: marker.
+
+// doko:modules
+";
+
 const MAILERS_MOD: &str = "\
 //! Mailers. `doko generate mailer <name>` adds to this file; keep the doko: marker.
 
@@ -64,16 +70,16 @@ pub fn job(root: &Path, name: &str) -> Result<Vec<String>, String> {
     add_module(root, "jobs", JOBS_MOD, name, &job_template(name, &ty), "// doko:jobs", &format!(".add::<{name}::{ty}>()"))
 }
 
-/// What `generate auth` wrote, and what it could not do itself.
+/// What a multi-file generator wrote, and what it could not do itself.
 #[derive(Debug)]
-pub struct Auth {
+pub struct Generated {
     pub written: Vec<String>,
     pub todo: Vec<String>,
 }
 
 /// `doko generate auth`: a users migration, `controllers/auth.rs`, `mailers/auth.rs` and a test,
 /// plus the bindings, var and secret they need.
-pub fn auth(root: &Path) -> Result<Auth, String> {
+pub fn auth(root: &Path) -> Result<Generated, String> {
     let toml_path = root.join("doko.toml");
     let doko_toml = fs::read_to_string(&toml_path).map_err(|e| format!("reading doko.toml: {e}"))?;
     let doc: toml::Table = toml::from_str(&doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
@@ -164,7 +170,7 @@ pub fn auth(root: &Path) -> Result<Auth, String> {
     if let Some(patched) = patched {
         written.push(write(&lib, &patched)?);
     }
-    Ok(Auth { written, todo })
+    Ok(Generated { written, todo })
 }
 
 fn random_hex() -> Option<String> {
@@ -175,12 +181,11 @@ fn random_hex() -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Adds what `generate auth` needs to `src/lib.rs`: the modules, and `RateLimiter` among the
-/// exported objects. Returns the new source if it changed, and what is left to do by hand.
-fn patch_lib(src: &str) -> (Option<String>, Vec<String>) {
-    let mut out = src.to_owned();
+/// Declares `modules` in the source of `src/lib.rs` where they are missing, and returns what is
+/// left to do by hand.
+fn add_mods(out: &mut String, modules: &[&str]) -> Vec<String> {
     let mut todo = Vec::new();
-    for module in ["mailers", "controllers", "bindings"] {
+    for module in modules {
         if out.lines().any(|l| l.trim() == format!("mod {module};")) {
             continue;
         }
@@ -193,6 +198,310 @@ fn patch_lib(src: &str) -> (Option<String>, Vec<String>) {
     if !out.contains("controllers::routes()") {
         todo.push("merge `controllers::routes()` into Hooks::routes in src/lib.rs".into());
     }
+    todo
+}
+
+/// A scaffold column: its name, SQL type, Rust type and a sample JSON value for the test.
+struct Field<'a> {
+    name: &'a str,
+    sql: &'static str,
+    rust: &'static str,
+    sample: &'static str,
+    changed: &'static str,
+}
+
+fn parse_field(spec: &str) -> Result<Field<'_>, String> {
+    let (name, kind) = spec.split_once(':').ok_or_else(|| format!("field `{spec}` must be name:type, e.g. `title:string`"))?;
+    check_snake("field", name)?;
+    if ["id", "created_at", "updated_at"].contains(&name) {
+        return Err(format!("field `{name}` is added to every scaffold already"));
+    }
+    let (sql, rust, sample, changed) = match kind {
+        "string" | "text" => ("TEXT", "String", "\"first\"", "\"second\""),
+        "int" | "integer" => ("INTEGER", "i64", "1", "2"),
+        "float" => ("REAL", "f64", "1.5", "2.5"),
+        "bool" | "boolean" => ("INTEGER", "bool", "true", "false"),
+        _ => return Err(format!("field `{name}`: type `{kind}` is not one of string, text, int, float, bool")),
+    };
+    Ok(Field { name, sql, rust, sample, changed })
+}
+
+// shortcut: English regular plurals only (post → posts, category → categories, box → boxes);
+// rename the table and routes by hand for anything else.
+fn plural(name: &str) -> String {
+    let vowel_y = ["ay", "ey", "iy", "oy", "uy"].iter().any(|v| name.ends_with(v));
+    match name {
+        n if n.ends_with('y') && !vowel_y => format!("{}ies", &n[..n.len() - 1]),
+        n if ["s", "x", "z", "ch", "sh"].iter().any(|e| n.ends_with(e)) => format!("{n}es"),
+        n => format!("{n}s"),
+    }
+}
+
+/// `doko generate scaffold post title:string body:text`: a migration, `models/post.rs`,
+/// `controllers/posts.rs` (list, show, create, update, delete) and a test.
+pub fn scaffold(root: &Path, name: &str, specs: &[&str]) -> Result<Generated, String> {
+    check_snake("scaffold", name)?;
+    let fields = specs.iter().map(|s| parse_field(s)).collect::<Result<Vec<_>, _>>()?;
+    if fields.is_empty() {
+        return Err(format!("a scaffold needs at least one field: doko generate scaffold {name} title:string"));
+    }
+    // Params are bound as one tuple, and serde's tuples end at 16; update binds every field plus the id.
+    if fields.len() > 15 {
+        return Err("a scaffold takes at most 15 fields; add the rest to the generated files by hand".into());
+    }
+    let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+    if let Some(dup) = names.iter().enumerate().find(|(i, n)| names[..*i].contains(n)) {
+        return Err(format!("field `{}` is listed twice", dup.1));
+    }
+    let table = plural(name);
+    let ty = camel(name);
+
+    let toml_path = root.join("doko.toml");
+    let doko_toml = fs::read_to_string(&toml_path).map_err(|e| format!("reading doko.toml: {e}"))?;
+    let doc: toml::Table = toml::from_str(&doko_toml).map_err(|e| format!("doko.toml: {e}"))?;
+    let d1 = doc.get("d1").and_then(|d| d.as_table());
+    let db = d1.and_then(|t| t.keys().next().cloned());
+    let migrations = root.join(
+        db.as_ref().and_then(|db| d1?.get(db)?.get("migrations_dir")?.as_str()).unwrap_or("migrations"),
+    );
+    let existing: Vec<String> = fs::read_dir(&migrations)
+        .map(|dir| dir.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+        .unwrap_or_default();
+    let next = existing.iter().filter_map(|n| n.split('_').next()?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+    let migration = migrations.join(format!("{next:04}_create_{table}.sql"));
+    let test = root.join(format!("tests/{table}.rs"));
+    for path in [root.join(format!("src/models/{name}.rs")), root.join(format!("src/controllers/{table}.rs")), test.clone()] {
+        if path.exists() {
+            return Err(format!("{} already exists", path.display()));
+        }
+    }
+    if existing.iter().any(|n| n.ends_with(&format!("_create_{table}.sql"))) {
+        return Err(format!("a migration already creates `{table}`"));
+    }
+
+    let write = |path: &Path, body: &str| -> Result<String, String> {
+        fs::create_dir_all(path.parent().expect("a file path")).map_err(|e| format!("creating {}: {e}", path.display()))?;
+        fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(path.display().to_string())
+    };
+    let db_name = db.clone().unwrap_or_else(|| "DB".into());
+    let mut written = add_module(root, "models", MODELS_MOD, name, &model_template(name, &ty, &table, &db_name, &fields), "", "")?;
+    written.extend(add_module(
+        root,
+        "controllers",
+        CONTROLLERS_MOD,
+        &table,
+        &resource_controller_template(name, &ty, &table),
+        ROUTES_MARKER,
+        &format!(".merge({table}::routes())"),
+    )?);
+    written.push(write(&migration, &scaffold_migration(&table, &fields))?);
+    written.push(write(&test, &scaffold_test(&table, &db_name, &fields))?);
+    if db.is_none() {
+        let app = doc.get("app").and_then(|a| a.get("name")?.as_str()).unwrap_or("app");
+        let add = format!("\n# The app's database: migrations/*.sql.\n[d1.DB]\ndatabase_name = \"{app}\"\n");
+        written.push(write(&toml_path, &format!("{}\n{add}", doko_toml.trim_end()))?);
+    }
+    let lib = root.join("src/lib.rs");
+    let mut src = fs::read_to_string(&lib).unwrap_or_default();
+    let before = src.clone();
+    let todo = add_mods(&mut src, &["models", "controllers", "bindings"]);
+    if src != before {
+        written.push(write(&lib, &src)?);
+    }
+    Ok(Generated { written, todo })
+}
+
+fn scaffold_migration(table: &str, fields: &[Field]) -> String {
+    let columns: String = fields.iter().map(|f| format!("  {} {} NOT NULL,\n", f.name, f.sql)).collect();
+    format!(
+        "\
+CREATE TABLE {table} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+{columns}  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"
+    )
+}
+
+fn model_template(name: &str, ty: &str, table: &str, db: &str, fields: &[Field]) -> String {
+    let join = |f: &dyn Fn(usize, &Field) -> String, sep: &str| fields.iter().enumerate().map(|(i, x)| f(i, x)).collect::<Vec<_>>().join(sep);
+    let struct_fields = join(&|_, f| format!("    pub {}: {},\n", f.name, f.rust), "");
+    // SQLite hands booleans back as 0 and 1.
+    let read_bool = |f: &Field| if f.rust == "bool" { "    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n" } else { "" };
+    let row_fields = join(&|_, f| format!("{}    pub {}: {},\n", read_bool(f), f.name, f.rust), "");
+    let rules: String = fields
+        .iter()
+        .filter(|f| f.rust == "String")
+        .map(|f| format!("        errors.check(\"{0}\", !self.{0}.trim().is_empty(), \"must not be empty\");\n", f.name))
+        .collect();
+    let rules = if rules.is_empty() { "        let _ = errors; // e.g. errors.check(\"price\", self.price >= 0, \"must not be negative\");\n".to_owned() } else { rules };
+    let columns = join(&|_, f| f.name.to_owned(), ", ");
+    let placeholders = join(&|i, _| format!("?{}", i + 1), ", ");
+    let assignments = join(&|i, f| format!("{} = ?{}", f.name, i + 1), ", ");
+    let args = join(&|_, f| format!("&input.{}", f.name), ", ");
+    let id_param = fields.len() + 1;
+    format!(
+        "\
+//! The `{table}` table. Written by `doko generate scaffold`; it is your code now.
+
+use doko::{{Ctx, Errors, Page, Paged, Result, Validate}};
+use serde::{{Deserialize, Serialize}};
+
+use crate::bindings::{db};
+
+/// A row of `{table}`.
+#[derive(Serialize, Deserialize)]
+pub struct {ty} {{
+    pub id: i64,
+{row_fields}    pub created_at: String,
+    pub updated_at: String,
+}}
+
+/// What a client sends to create or update a {name}.
+#[derive(Deserialize)]
+pub struct {ty}Input {{
+{struct_fields}}}
+
+impl Validate for {ty}Input {{
+    fn validate(&self, errors: &mut Errors) {{
+{rules}    }}
+}}
+
+#[derive(Deserialize)]
+struct Count {{
+    n: i64,
+}}
+
+impl {ty} {{
+    /// One page, newest first.
+    pub async fn page(ctx: &Ctx, page: Page) -> Result<Paged<{ty}>> {{
+        let db = ctx.db({db})?;
+        let sql = \"SELECT * FROM {table} ORDER BY id DESC LIMIT ?1 OFFSET ?2\";
+        let items = db.all(sql, (page.limit(), page.offset())).await?;
+        let total: Option<Count> = db.first(\"SELECT COUNT(*) AS n FROM {table}\", ()).await?;
+        Ok(page.of(items, total.map_or(0, |c| c.n)))
+    }}
+
+    pub async fn find(ctx: &Ctx, id: i64) -> Result<Option<{ty}>> {{
+        ctx.db({db})?.first(\"SELECT * FROM {table} WHERE id = ?1\", (id,)).await
+    }}
+
+    pub async fn create(ctx: &Ctx, input: &{ty}Input) -> Result<Option<{ty}>> {{
+        let sql = \"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *\";
+        ctx.db({db})?.first(sql, ({args},)).await
+    }}
+
+    /// `None` when there is no such row.
+    pub async fn update(ctx: &Ctx, id: i64, input: &{ty}Input) -> Result<Option<{ty}>> {{
+        let sql = \"UPDATE {table} SET {assignments}, updated_at = datetime('now') WHERE id = ?{id_param} RETURNING *\";
+        ctx.db({db})?.first(sql, ({args}, id)).await
+    }}
+
+    /// Whether a row was deleted.
+    pub async fn delete(ctx: &Ctx, id: i64) -> Result<bool> {{
+        Ok(ctx.db({db})?.run(\"DELETE FROM {table} WHERE id = ?1\", (id,)).await?.changes != Some(0))
+    }}
+}}
+"
+    )
+}
+
+fn resource_controller_template(name: &str, ty: &str, table: &str) -> String {
+    let path = table.replace('_', "-");
+    format!(
+        "\
+//! `/{path}`: list, show, create, update and delete. Written by `doko generate scaffold`; it is your code now.
+//! These routes are public: add `.require_auth()` after the ones that shouldn't be.
+
+use doko::{{
+    Ctx, Error, Page, Paged, Result, Valid,
+    axum::{{Json, Router, extract::Path, http::StatusCode, routing::get}},
+}};
+
+use crate::models::{name}::{{{ty}, {ty}Input}};
+
+pub fn routes() -> Router<Ctx> {{
+    Router::new()
+        .route(\"/{path}\", get(index).post(create))
+        .route(\"/{path}/{{id}}\", get(show).put(update).delete(destroy))
+}}
+
+/// `GET /{path}?page=1&per_page=20`
+async fn index(ctx: Ctx, page: Page) -> Result<Json<Paged<{ty}>>> {{
+    Ok(Json({ty}::page(&ctx, page).await?))
+}}
+
+async fn show(ctx: Ctx, Path(id): Path<i64>) -> Result<Json<{ty}>> {{
+    {ty}::find(&ctx, id).await?.map(Json).ok_or_else(Error::not_found)
+}}
+
+async fn create(ctx: Ctx, Valid(input): Valid<{ty}Input>) -> Result<(StatusCode, Json<{ty}>)> {{
+    let created = {ty}::create(&ctx, &input).await?.ok_or_else(|| Error::internal(\"insert returned no row\"))?;
+    Ok((StatusCode::CREATED, Json(created)))
+}}
+
+async fn update(ctx: Ctx, Path(id): Path<i64>, Valid(input): Valid<{ty}Input>) -> Result<Json<{ty}>> {{
+    {ty}::update(&ctx, id, &input).await?.map(Json).ok_or_else(Error::not_found)
+}}
+
+async fn destroy(ctx: Ctx, Path(id): Path<i64>) -> Result<StatusCode> {{
+    if {ty}::delete(&ctx, id).await? {{ Ok(StatusCode::NO_CONTENT) }} else {{ Err(Error::not_found()) }}
+}}
+"
+    )
+}
+
+fn scaffold_test(table: &str, db: &str, fields: &[Field]) -> String {
+    let path = table.replace('_', "-");
+    let json = |pick: &dyn Fn(&Field) -> &'static str| {
+        let pairs: Vec<String> = fields.iter().map(|f| format!("\\\"{}\\\":{}", f.name, pick(f).replace('"', "\\\""))).collect();
+        format!("{{{}}}", pairs.join(","))
+    };
+    let (sample, changed) = (json(&|f| f.sample), json(&|f| f.changed));
+    let first = &fields[0];
+    let expect_changed = format!("\\\"{}\\\":{}", first.name, first.changed.replace('"', "\\\""));
+    format!(
+        "\
+//! `/{path}` from `doko generate scaffold`, against `wrangler dev`: `cargo test -- --ignored` (needs Node).
+
+const JSON: [(&str, &str); 1] = [(\"content-type\", \"application/json\")];
+
+#[test]
+#[ignore = \"starts wrangler dev\"]
+fn {table}_crud() {{
+    let app = doko::test::App::start(&[\"{db}\"]);
+    assert!(app.get(\"/{path}\").body.contains(\"\\\"total\\\":0\"));
+    assert_eq!(app.send(\"POST\", \"/{path}\", &JSON, \"{{}}\").status, 422, \"a body without the fields\");
+
+    let created = app.send(\"POST\", \"/{path}\", &JSON, \"{sample}\");
+    assert_eq!(created.status, 201, \"{{}}\", created.body);
+    assert!(created.body.contains(\"\\\"id\\\":1\"), \"{{}}\", created.body);
+    assert_eq!(app.send(\"POST\", \"/{path}\", &JSON, \"{sample}\").status, 201);
+
+    let page = app.get(\"/{path}?per_page=1\");
+    assert!(page.body.contains(\"\\\"total\\\":2\") && page.body.contains(\"\\\"total_pages\\\":2\"), \"{{}}\", page.body);
+    assert!(page.body.contains(\"\\\"id\\\":2\") && !page.body.contains(\"\\\"id\\\":1\"), \"newest first: {{}}\", page.body);
+
+    let updated = app.send(\"PUT\", \"/{path}/1\", &JSON, \"{changed}\");
+    assert_eq!(updated.status, 200, \"{{}}\", updated.body);
+    assert!(app.get(\"/{path}/1\").body.contains(\"{expect_changed}\"));
+
+    assert_eq!(app.delete(\"/{path}/1\").status, 204);
+    assert_eq!(app.get(\"/{path}/1\").status, 404);
+    assert_eq!(app.delete(\"/{path}/1\").status, 404);
+    assert_eq!(app.send(\"PUT\", \"/{path}/1\", &JSON, \"{changed}\").status, 404);
+}}
+"
+    )
+}
+
+/// Adds what `generate auth` needs to `src/lib.rs`: the modules, and `RateLimiter` among the
+/// exported objects. Returns the new source if it changed, and what is left to do by hand.
+fn patch_lib(src: &str) -> (Option<String>, Vec<String>) {
+    let mut out = src.to_owned();
+    let mut todo = add_mods(&mut out, &["mailers", "controllers", "bindings"]);
     let call = out.find("doko::app!(").and_then(|start| Some((start, start + out[start..].find(");")?)));
     match call {
         Some((start, end)) if !out[start..end].contains("RateLimiter") => {
@@ -573,6 +882,55 @@ mod tests {
         assert_eq!(todo, ["merge `controllers::routes()` into Hooks::routes in src/lib.rs"]);
         let done = "mod bindings;\nmod controllers;\nmod mailers;\nuse doko::RateLimiter;\nfn r() { controllers::routes() }\ndoko::app!(App, objects: [RateLimiter]);\n";
         assert_eq!(patch_lib(done), (None, vec![]));
+    }
+
+    #[test]
+    fn scaffolds_a_resource() {
+        let root = tmp("scaffold");
+        app(&root.0, "shop").unwrap();
+        let dir = root.0.join("shop");
+        let out = scaffold(&dir, "category", &["name:string", "position:int", "price:float", "visible:bool"]).unwrap();
+        assert!(out.todo.is_empty(), "{:?}", out.todo);
+        let read = |f: &str| fs::read_to_string(dir.join(f)).unwrap_or_else(|_| panic!("{f}"));
+        let sql = read("migrations/0001_create_categories.sql");
+        assert!(sql.contains("  name TEXT NOT NULL,\n  position INTEGER NOT NULL,\n  price REAL NOT NULL,\n  visible INTEGER NOT NULL,\n"), "{sql}");
+        let model = read("src/models/category.rs");
+        assert!(model.contains("pub struct CategoryInput {\n    pub name: String,\n    pub position: i64,\n    pub price: f64,\n    pub visible: bool,\n}"), "{model}");
+        assert!(model.contains("    #[serde(deserialize_with = \"doko::bool_from_sql\")]\n    pub visible: bool,\n    pub created_at"), "{model}");
+        assert_eq!(model.matches("bool_from_sql").count(), 1, "the input struct reads JSON booleans");
+        assert!(model.contains("INSERT INTO categories (name, position, price, visible) VALUES (?1, ?2, ?3, ?4) RETURNING *"), "{model}");
+        assert!(model.contains("SET name = ?1, position = ?2, price = ?3, visible = ?4, updated_at = datetime('now') WHERE id = ?5"), "{model}");
+        assert!(model.contains("(&input.name, &input.position, &input.price, &input.visible, id)"), "{model}");
+        assert!(model.contains("errors.check(\"name\", !self.name.trim().is_empty()") && !model.contains("errors.check(\"position\""), "{model}");
+        let controller = read("src/controllers/categories.rs");
+        assert!(controller.contains("use crate::models::category::{Category, CategoryInput};") && controller.contains("\"/categories/{id}\""), "{controller}");
+        assert!(read("src/controllers/mod.rs").contains(".merge(categories::routes())"));
+        let test = read("tests/categories.rs");
+        assert!(test.contains(r#""{\"name\":\"first\",\"position\":1,\"price\":1.5,\"visible\":true}""#), "{test}");
+        assert!(read("src/lib.rs").starts_with("mod bindings;\nmod models;\nmod controllers;\n"));
+        assert!(crate::config::render(&read("doko.toml")).unwrap().bindings_rs.unwrap().contains("pub const DB:"));
+
+        // A second resource reuses the database and takes the next migration number.
+        scaffold(&dir, "blog_post", &["title:text"]).unwrap();
+        assert!(dir.join("migrations/0002_create_blog_posts.sql").exists());
+        assert!(read("src/controllers/blog_posts.rs").contains("\"/blog-posts\""));
+        assert_eq!(read("doko.toml").matches("[d1.DB]").count(), 1);
+        assert!(scaffold(&dir, "category", &["name:string"]).unwrap_err().contains("already exists"));
+    }
+
+    #[test]
+    fn rejects_bad_scaffolds_and_pluralizes() {
+        let root = tmp("scaffold-bad");
+        assert!(scaffold(&root.0, "post", &[]).unwrap_err().contains("at least one field"));
+        assert!(scaffold(&root.0, "post", &["title"]).unwrap_err().contains("name:type"));
+        assert!(scaffold(&root.0, "post", &["title:varchar"]).unwrap_err().contains("not one of"));
+        assert!(scaffold(&root.0, "post", &["id:int"]).unwrap_err().contains("already"));
+        assert!(scaffold(&root.0, "post", &["a:int", "a:int"]).unwrap_err().contains("twice"));
+        assert!(scaffold(&root.0, "Post", &["a:int"]).is_err());
+        assert!(!root.0.join("src").exists(), "nothing written");
+        for (one, many) in [("post", "posts"), ("category", "categories"), ("day", "days"), ("box", "boxes"), ("match", "matches"), ("address", "addresses")] {
+            assert_eq!(plural(one), many);
+        }
     }
 
     #[test]

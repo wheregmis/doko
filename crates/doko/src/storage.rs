@@ -212,6 +212,29 @@ impl Bucket {
     }
 }
 
+/// Reads a boolean column. D1 and SQLite have no boolean type: `true` is stored as `1` and comes
+/// back as a number, which serde won't read into a `bool` by itself.
+///
+/// ```ignore
+/// #[derive(Deserialize)]
+/// struct Post {
+///     #[serde(deserialize_with = "doko::bool_from_sql")]
+///     published: bool,
+/// }
+/// ```
+pub fn bool_from_sql<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<bool, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Bool(bool),
+        Number(f64),
+    }
+    Ok(match serde::Deserialize::deserialize(deserializer)? {
+        Stored::Bool(b) => b,
+        Stored::Number(n) => n != 0.0,
+    })
+}
+
 /// A D1 database. `params` is a tuple bound to `?1`, `?2`, ...: `(id,)`, `(name, age)`, or `()`.
 pub struct Db(pub(crate) SendWrapper<D1Database>);
 
@@ -277,5 +300,24 @@ impl Db {
             return Err(Error::internal("D1 params must be a tuple, e.g. `(id,)` or `()`"));
         };
         Ok(self.0.prepare(sql).bind(&args)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(deserialize_with = "super::bool_from_sql")]
+        on: bool,
+    }
+
+    #[test]
+    fn reads_sql_booleans() {
+        let on = |json: &str| serde_json::from_str::<Row>(json).map(|r| r.on).ok();
+        assert_eq!(on(r#"{"on":1}"#), Some(true));
+        assert_eq!(on(r#"{"on":0}"#), Some(false));
+        assert_eq!(on(r#"{"on":1.0}"#), Some(true), "D1 returns numbers as floats");
+        assert_eq!(on(r#"{"on":true}"#), Some(true));
+        assert_eq!(on(r#"{"on":"yes"}"#), None);
     }
 }

@@ -40,9 +40,10 @@ pub use jobs::{Job, Jobs, Tasks};
 pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html, render_html, render_text};
 #[cfg(feature = "pg")]
 pub use pg::{Pg, PgStatement};
-pub use request::{Errors, Valid, Validate};
+pub use request::{Errors, Page, Paged, Valid, Validate};
 pub use storage::{
     Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding, Statement,
+    bool_from_sql,
 };
 pub use worker;
 

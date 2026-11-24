@@ -27,7 +27,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
-| [Generators](#generators) | `doko new`, `generate auth \| controller \| job \| mailer \| migration` |
+| [Generators](#generators) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
 doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](https://github.com/wheregmis/doko/blob/master/ROADMAP.md) for the roadmap.
@@ -121,6 +121,22 @@ routes = [{ pattern = "app.example.com", custom_domain = true }]
 
 Every request is logged as one JSON line, and responses carry `x-request-id` (the `cf-ray` header, or `-` locally). `GET /_health` answers `{"ok": true}` without touching your routes or their auth, for uptime checks. For other middleware, `.layer(...)` any tower layer onto your router.
 
+### Pagination
+
+```rust
+use doko::{Page, Paged};
+
+// GET /posts?page=2&per_page=50
+async fn index(ctx: Ctx, page: Page) -> Result<Json<Paged<Post>>> {
+    let db = ctx.db(DB)?;
+    let posts = db.all("SELECT * FROM posts ORDER BY id DESC LIMIT ?1 OFFSET ?2", (page.limit(), page.offset())).await?;
+    let total = count(&db).await?;                 // SELECT COUNT(*) FROM posts
+    Ok(Json(page.of(posts, total)))
+}
+```
+
+The response is `{"items": [..], "page": 2, "per_page": 50, "total": 120, "total_pages": 3}`. Without the parameters a request gets page 1 of 20. `per_page` is capped at 100, so a client can't ask for a whole table.
+
 ### Validation
 
 ```rust
@@ -206,6 +222,24 @@ doko generate mailer welcome
 This writes `src/mailers/welcome.rs`, a function that builds a `Message`, and declares it in `src/mailers/mod.rs`. Add `mod mailers;` once. See [Email](#email).
 
 ```bash
+doko generate scaffold post title:string body:text published:bool
+```
+
+This writes a whole resource. Then `doko migrate && doko dev`.
+
+| File | What |
+|---|---|
+| `migrations/NNNN_create_posts.sql` | the `posts` table: your fields plus `id`, `created_at`, `updated_at` |
+| `src/models/post.rs` | `Post`, `PostInput` with its validation, and `Post::page`, `find`, `create`, `update`, `delete` as plain SQL |
+| `src/controllers/posts.rs` | `GET /posts` (paginated), `POST /posts`, `GET`, `PUT` and `DELETE /posts/{id}` |
+| `tests/posts.rs` | the five routes as an integration test |
+
+- **Field types:** `string`, `text`, `int`, `float`, `bool`. Every field is `NOT NULL`; text fields get a "must not be empty" rule to start from.
+- **No ORM.** The model is SQL you can read and change, and the generator runs once: later changes are yours, in a new migration and the model file.
+- **The routes are public** until you add `.require_auth()`.
+- It uses the app's first `[d1.*]` binding, or adds `[d1.DB]`. Plurals are the regular English ones (`category` → `categories`); rename by hand for others.
+
+```bash
 doko generate auth
 ```
 
@@ -260,6 +294,8 @@ ctx.bucket(FILES)?.serve("logo.png").await   // streams with content-type + etag
 | `Db` | `all::<T>`, `first::<T>`, `run` (returns `changes`, `last_row_id`), `statement` + `batch` (one transaction) |
 
 D1 params are a tuple bound to `?1`, `?2` and so on: `(id,)`, `(name, age)` or `()`. Each wrapper has `.raw()` for the full `worker` API.
+
+D1 stores a `bool` as `1` or `0` and hands back a number. Mark boolean fields of a row struct with `#[serde(deserialize_with = "doko::bool_from_sql")]` so they read back as `bool`.
 
 **Uploads.** `put_stream` takes the handler's `body: Body` and stores it as it arrives, holding at most 8 MiB in memory. Bodies larger than that go to R2 as a multipart upload, a part at a time; if the body fails midway, nothing is stored.
 

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json,
-    extract::{FromRequest, Request},
+    extract::{FromRequest, FromRequestParts, Query, Request},
     http::{
-        HeaderName, HeaderValue, Method, StatusCode,
+        HeaderName, HeaderValue, Method, StatusCode, request::Parts,
         header::{
             ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
             ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS,
@@ -17,7 +17,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{Ctx, Error, Hooks, Result};
@@ -93,6 +93,83 @@ impl<S: Send + Sync, T: DeserializeOwned + Validate> FromRequest<S> for Valid<T>
         errors.finish()?;
         Ok(Self(value))
     }
+}
+
+const PER_PAGE: i64 = 20;
+const MAX_PER_PAGE: i64 = 100;
+
+/// Which page of a list a request asks for: `?page=2&per_page=50`. Extract it in a handler.
+///
+/// ```ignore
+/// async fn index(ctx: Ctx, page: Page) -> Result<Json<Paged<Post>>> {
+///     let db = ctx.db(DB)?;
+///     let posts = db.all("SELECT * FROM posts ORDER BY id DESC LIMIT ?1 OFFSET ?2", (page.limit(), page.offset())).await?;
+///     Ok(Json(page.of(posts, total)))    // total: SELECT COUNT(*) FROM posts
+/// }
+/// ```
+///
+/// Pages start at 1. Without the parameters it is page 1 of 20; `per_page` is capped at 100,
+/// so a client can't ask for the whole table. Parameters that aren't numbers get a 400.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(from = "PageQuery")]
+pub struct Page {
+    page: i64,
+    per_page: i64,
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+impl From<PageQuery> for Page {
+    fn from(q: PageQuery) -> Self {
+        Self::new(q.page.unwrap_or(1), q.per_page.unwrap_or(PER_PAGE))
+    }
+}
+
+impl Page {
+    /// Out-of-range values are brought into range instead of refused.
+    pub fn new(page: i64, per_page: i64) -> Self {
+        Self { page: page.max(1), per_page: per_page.clamp(1, MAX_PER_PAGE) }
+    }
+
+    /// For SQL's `LIMIT`.
+    pub fn limit(&self) -> i64 {
+        self.per_page
+    }
+
+    /// For SQL's `OFFSET`.
+    pub fn offset(&self) -> i64 {
+        (self.page - 1).saturating_mul(self.per_page)
+    }
+
+    /// Wraps this page's `items` with what a client needs to show page links. `total` is the
+    /// number of rows in the whole list.
+    pub fn of<T>(&self, items: Vec<T>, total: i64) -> Paged<T> {
+        let total_pages = (total.max(0) + self.per_page - 1) / self.per_page;
+        Paged { items, page: self.page, per_page: self.per_page, total, total_pages }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Page {
+    type Rejection = Error;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self> {
+        let Query(page) = Query::<Page>::from_request_parts(parts, state).await.map_err(|e| Error::bad_request(e.body_text()))?;
+        Ok(page)
+    }
+}
+
+/// One page of a list, as JSON: `{"items": [..], "page": 1, "per_page": 20, "total": 41, "total_pages": 3}`.
+#[derive(Serialize, Debug)]
+pub struct Paged<T> {
+    pub items: Vec<T>,
+    pub page: i64,
+    pub per_page: i64,
+    pub total: i64,
+    pub total_pages: i64,
 }
 
 /// `[middleware]` from doko.toml. `doko config` has already validated it.
@@ -236,6 +313,18 @@ mod tests {
         let mut listed = cors(&["*"], false);
         listed.headers = Some(vec!["content-type".into()]);
         assert_eq!(get(&listed.headers("https://x.example", Some(Some("x-api-key"))), &ACCESS_CONTROL_ALLOW_HEADERS), Some("content-type"));
+    }
+
+    #[test]
+    fn pages_clamp_and_count() {
+        let page = Page::new(3, 10);
+        assert_eq!((page.limit(), page.offset()), (10, 20));
+        let paged = page.of(vec![1, 2, 3], 23);
+        assert_eq!((paged.total, paged.total_pages, paged.page), (23, 3, 3));
+        assert_eq!(Page::new(1, 20).of(Vec::<i64>::new(), 0).total_pages, 0);
+        assert_eq!(Page::new(1, 20).of(vec![0; 20], 20).total_pages, 1);
+        assert_eq!(Page::new(-5, 100_000), Page::new(1, 100), "out of range is clamped");
+        assert_eq!(Page::from(PageQuery { page: None, per_page: None }), Page::new(1, 20));
     }
 
     #[test]
