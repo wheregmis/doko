@@ -464,7 +464,7 @@ fn scaffold_test(table: &str, db: &str, fields: &[Field]) -> String {
     let expect_changed = format!("\\\"{}\\\":{}", first.name, first.changed.replace('"', "\\\""));
     format!(
         "\
-//! `/{path}` from `doko generate scaffold`, against `wrangler dev`: `cargo test -- --ignored` (needs Node).
+//! `/{path}` from `doko generate scaffold`, against `wrangler dev`: `doko test` (needs Node).
 
 const JSON: [(&str, &str); 1] = [(\"content-type\", \"application/json\")];
 
@@ -679,7 +679,7 @@ doko::app!(App);
 ";
 
 const APP_SMOKE_TEST: &str = "\
-//! Runs against `wrangler dev`: `cargo test -- --ignored` (needs Node).
+//! Runs against `wrangler dev`: `doko test` (needs Node).
 
 #[test]
 #[ignore = \"starts wrangler dev\"]

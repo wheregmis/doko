@@ -1,4 +1,4 @@
-//! Runs the hello worker under `wrangler dev`: `cargo test -p hello -- --ignored` (needs Node).
+//! Runs the hello worker under `wrangler dev`: `doko test` (needs Node).
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 #[test]
 #[ignore = "starts wrangler dev"]
 fn notes_and_jobs() {
-    let app = doko::test::App::start(&["DB"]);
+    let app = doko::test::App::start_with_seeds(&["DB"], &[("DB", "tests/seeds/notes.sql")]);
 
     let health: Value = app.get("/health").json();
     assert_eq!(health, json!({ "status": "ok", "env": "dev" }));
@@ -28,15 +28,13 @@ fn notes_and_jobs() {
     let id = res.json::<Value>()["id"].as_i64().unwrap();
 
     // The CountWords job fills `words` in the background, then purges the cached note.
-    let started = Instant::now();
-    loop {
-        let note: Value = app.get(&format!("/notes/{id}")).json();
-        if note["words"] == 3 {
-            break;
-        }
-        assert!(started.elapsed() < Duration::from_secs(30), "CountWords never ran: {note}");
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    app.wait_for_job("count_words");
+    let note: Value = app.get(&format!("/notes/{id}")).json();
+    assert_eq!(note["words"], 3, "{note}");
+
+    // The seed file ran after the migrations and before the worker started.
+    let notes: Vec<Value> = app.get("/notes").json();
+    assert!(notes.iter().any(|n| n["body"] == "seeded note"), "{notes:?}");
 
     assert_eq!(app.get("/notes/999999").status, 404);
 }
@@ -292,10 +290,13 @@ fn auth() {
     assert_eq!(app.send("GET", "/admin", &[("authorization", &format!("Bearer {token}"))], "").status, 403);
     let admin = json!({ "username": "admin", "password": "correct horse" });
     assert_eq!(app.post_json("/signup", &admin).status, 201);
-    let admin_login = app.post_json("/login", &admin);
-    let admin_cookie = admin_login.header("set-cookie").unwrap().split(';').next().unwrap().to_owned();
-    let welcomed = app.send("GET", "/admin", &[("cookie", &admin_cookie)], "");
+    // A client keeps cookies like a browser, so there is no cookie to carry by hand.
+    let browser = app.client();
+    assert_eq!(browser.post_json("/login", &admin).status, 200);
+    let welcomed = browser.get("/admin");
     assert_eq!((welcomed.status, welcomed.body.as_str()), (200, "welcome, admin"));
+    assert_eq!(browser.send("POST", "/logout", &[], "").status, 200);
+    assert_eq!(browser.get("/admin").status, 401, "logout dropped the cookie");
 
     // Logout ends the session on the server, so the old cookie stops working.
     let logout = app.send("POST", "/logout", &[("cookie", cookie)], "");
@@ -314,6 +315,10 @@ fn email() {
     assert_eq!(app.post_json("/contact", &json!({ "email": "ada@example.com", "message": " " })).status, 400);
     let sent = app.post_json("/contact", &json!({ "email": "ada@example.com", "message": "Hello there" }));
     assert_eq!(sent.status, 202, "{}", sent.body);
+    let mail = app.mail_to("owner@example.com");
+    assert_eq!(mail.subject, "New contact form message");
+    assert!(mail.text.contains("From: ada@example.com") && mail.text.contains("Hello there"), "{}", mail.text);
+    assert!(mail.html.contains("<p>Hello there</p>"), "{}", mail.html);
 
     // Receiving: wrangler dev's local endpoint delivers a raw message to Hooks::on_email.
     let raw = "From: Ada <ada@example.com>\r\nTo: notes@example.com\r\nSubject: =?UTF-8?B?THVuY2gg8J+NnT8=?=\r\n\

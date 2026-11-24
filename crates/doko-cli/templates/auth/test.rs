@@ -1,4 +1,4 @@
-//! The account flow from `doko generate auth`, against `wrangler dev`: `cargo test -- --ignored` (needs Node).
+//! The account flow from `doko generate auth`, against `wrangler dev`: `doko test` (needs Node).
 
 use std::collections::BTreeMap;
 
@@ -6,9 +6,16 @@ fn credentials<'a>(email: &'a str, password: &'a str) -> BTreeMap<&'a str, &'a s
     BTreeMap::from([("email", email), ("password", password)])
 }
 
+/// The `token` in the link of a mail.
+fn token(mail: &doko::test::Mail) -> &str {
+    mail.text.split("token=").nth(1).expect("a link with a token").split_whitespace().next().unwrap()
+}
+
+// The routes below are limited to 10 requests a minute per client, and this test is one client:
+// it makes 9. Start another `App` for more.
 #[test]
 #[ignore = "starts wrangler dev"]
-fn registers_logs_in_and_out() {
+fn registers_verifies_logs_in_and_resets() {
     let app = doko::test::App::start(&["__DB__"]);
     assert_eq!(app.get("/auth/me").status, 401);
 
@@ -20,19 +27,29 @@ fn registers_logs_in_and_out() {
     assert_eq!(app.post_json("/auth/register", &ada).status, 201);
     assert_eq!(app.post_json("/auth/register", &ada).status, 201, "a taken address gets the same answer");
 
-    assert_eq!(app.post_json("/auth/login", &credentials("ada@example.com", "wrong horse")).status, 401);
-    assert_eq!(app.post_json("/auth/login", &credentials("nobody@example.com", "correct horse")).status, 401);
-    let login = app.post_json("/auth/login", &credentials("ada@example.com", "correct horse"));
-    assert_eq!(login.status, 200, "{}", login.body);
-    let cookie = login.header("set-cookie").expect("a session cookie").split(';').next().unwrap().to_owned();
-
-    let me = app.send("GET", "/auth/me", &[("cookie", &cookie)], "");
-    assert_eq!(me.status, 200);
-    assert!(me.body.contains("\"email\":\"ada@example.com\"") && me.body.contains("\"email_verified\":false"), "{}", me.body);
-
+    // The link in the verification mail verifies the address; a made-up token does not.
+    let mail = app.mail_to("ada@example.com");
+    assert_eq!(mail.subject, "Confirm your email address");
     assert_eq!(app.get("/auth/verify?token=forged.token").status, 400);
-    assert_eq!(app.post_json("/auth/forgot-password", &BTreeMap::from([("email", "nobody@example.com")])).status, 202);
+    assert_eq!(app.get(&format!("/auth/verify?token={}", token(&mail))).status, 200);
 
-    assert_eq!(app.send("POST", "/auth/logout", &[("cookie", &cookie)], "").status, 200);
-    assert_eq!(app.send("GET", "/auth/me", &[("cookie", &cookie)], "").status, 401);
+    // A client keeps the session cookie, like a browser.
+    let browser = app.client();
+    assert_eq!(browser.post_json("/auth/login", &credentials("ada@example.com", "wrong horse")).status, 401);
+    assert_eq!(browser.get("/auth/me").status, 401);
+    let login = browser.post_json("/auth/login", &credentials("ada@example.com", "correct horse"));
+    assert_eq!(login.status, 200, "{}", login.body);
+    let me = browser.get("/auth/me");
+    assert!(me.body.contains("\"email\":\"ada@example.com\"") && me.body.contains("\"email_verified\":true"), "{}", me.body);
+    assert_eq!(browser.send("POST", "/auth/logout", &[], "").status, 200);
+    assert_eq!(browser.get("/auth/me").status, 401);
+
+    // Forgot password: a mail with a link that works once.
+    assert_eq!(app.post_json("/auth/forgot-password", &BTreeMap::from([("email", "ada@example.com")])).status, 202);
+    let mail = app.mail_to("ada@example.com");
+    assert_eq!(mail.subject, "Reset your password");
+    let reset = BTreeMap::from([("token", token(&mail)), ("password", "battery staple")]);
+    assert_eq!(app.post_json("/auth/reset-password", &reset).status, 204);
+    assert_eq!(app.post_json("/auth/reset-password", &reset).status, 400, "the link works once");
+    assert_eq!(app.post_json("/auth/login", &credentials("ada@example.com", "battery staple")).status, 200);
 }

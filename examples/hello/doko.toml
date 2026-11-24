@@ -24,6 +24,12 @@ MOTTO = "carry it with one strap"   # plain vars, read with ctx.var("MOTTO")
 # [env.prod.wrangler]
 # routes = [{ pattern = "hello.example.com", custom_domain = true }]
 
+# Secrets the app can't run without: names only, the values live in `wrangler secret put` and .dev.vars.
+# `doko dev` warns, `doko doctor` reports and `doko deploy` refuses when one is missing.
+# SESSION_SECRET is on the list by itself, because [kv.SESSIONS] is declared below.
+[secrets]
+required = ["JWT_SECRET"]
+
 # What doko puts around every request. All optional; [env.<name>.middleware] is deep-merged over it.
 [middleware]
 # secure_headers = false        # default: nosniff, x-frame-options and referrer-policy on every response
