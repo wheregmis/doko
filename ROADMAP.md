@@ -22,10 +22,13 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 5. DX | `doko new`, `generate job\|migration\|controller`, `doko::test::App`, `doko deploy --env` | Depends on doko by git; tests need Node and `--ignored` |
 | 6. Durable Objects | `[do.NAME]` with generated bindings and append-only class migrations, `DurableObject` trait exported by `doko::app!(App, objects: [..])`, `ctx.durable(NAME)?.get(name)?.fetch(req)`, `RateLimiter` + `.rate_limit(RateLimit::new(..))` | Stubs speak `fetch` only (no RPC helper); no WebSocket handlers; limits key on client IP only; class deletions and renames are hand-written migrations |
 | 7. Auth | `doko::auth`: `Session` extractor (signed cookie, KV or `SessionStore` object), `Claims<T>` for HS256/RS256 JWTs, `sign()`, `hash_password`/`verify_password`, `.require_auth()` | Wired by fixed names (`SESSIONS`, `SESSION_SECRET`, `JWT_SECRET`, `JWT_PUBLIC_KEY`); session TTL fixed at 7 days; one RS256 key, no JWKS or `iss`/`aud` checks; no roles |
+| 10. Email | `[email.NAME]` → `send_email` binding, `ctx.mail(NAME)?.send(&Message { .. })`, `Hooks::on_email` with `InboundEmail::read()` (decoded subject, text, html), `generate mailer` | Plain addresses only; attachments, cc/bcc, custom headers and replies via `.raw()`; no template engine; routing rules are set up outside doko |
 
 ## Next
 
 Each phase ends with the `hello` example using the feature and an integration test through `doko::test::App`.
+
+Phases 8 and 9 are on hold until the foundation is solid: hardening and the backlog below come first.
 
 ### Phase 8: Hyperdrive / Postgres
 - `[hyperdrive.NAME]` binding; `ctx.pg("NAME")` giving a connection over the Hyperdrive connection string.
@@ -37,12 +40,6 @@ Each phase ends with the `hello` example using the feature and an integration te
 - `[ai]` binding; `ctx.ai().run::<In, Out>(model, input)` with serde types, plus streaming text responses as an axum body.
 - **Milestone:** a summarize route in `hello`.
 
-### Phase 10: email
-- Sending via Email Sending/`send_email` binding: `ctx.mail("NAME").send(Message { .. })`.
-- Receiving: `Hooks::on_email` dispatched by `doko::app!` from `#[event(email)]`, with parsed headers and body.
-- `generate mailer` for a templated message module.
-- **Milestone:** a contact form that sends a mail, and an inbound handler that logs it.
-
 ## Backlog
 
 Limits from the shipped phases, picked up when a user needs them:
@@ -51,6 +48,7 @@ Limits from the shipped phases, picked up when a user needs them:
 - `Vary` support in the response cache.
 - Concurrent processing of queue batches.
 - Rate limit keys other than client IP (per user), and WebSocket handlers on Durable Objects.
+- Email: named addresses, attachments and cc/bcc on `Message`; an HTML-escaping helper or templates for mailers.
 - Auth: configurable session TTL and cookie name, JWKS with key rotation, `iss`/`aud` checks.
 - A proc-macro crate, only if a feature can't be done with `macro_rules!` and traits.
 

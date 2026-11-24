@@ -7,3 +7,4 @@ pub const FILES: doko::R2Binding = doko::R2Binding::new("FILES");
 pub const DB: doko::D1Binding = doko::D1Binding::new("DB");
 pub const JOBS: doko::QueueBinding = doko::QueueBinding::new("JOBS");
 pub const RATE_LIMITER: doko::DoBinding = doko::DoBinding::new("RATE_LIMITER");
+pub const EMAIL: doko::EmailBinding = doko::EmailBinding::new("EMAIL");

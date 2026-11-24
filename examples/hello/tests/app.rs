@@ -87,3 +87,24 @@ fn auth() {
     assert!(logout.header("set-cookie").unwrap().contains("Max-Age=0"));
     assert_eq!(app.send("GET", "/me", &[("cookie", cookie)], "").status, 401);
 }
+
+#[test]
+#[ignore = "starts wrangler dev"]
+fn email() {
+    let app = doko::test::App::start(&["DB"]);
+
+    // Sending: wrangler dev logs the mail instead of delivering it.
+    assert_eq!(app.post_json("/contact", &json!({ "email": "not-an-address", "message": "hi" })).status, 400);
+    assert_eq!(app.post_json("/contact", &json!({ "email": "ada@example.com", "message": " " })).status, 400);
+    let sent = app.post_json("/contact", &json!({ "email": "ada@example.com", "message": "Hello there" }));
+    assert_eq!(sent.status, 202, "{}", sent.body);
+
+    // Receiving: wrangler dev's local endpoint delivers a raw message to Hooks::on_email.
+    let raw = "From: Ada <ada@example.com>\r\nTo: notes@example.com\r\nSubject: =?UTF-8?B?THVuY2gg8J+NnT8=?=\r\n\
+               Message-ID: <1@example.com>\r\nDate: Mon, 23 Nov 2026 10:00:00 +0000\r\n\r\nNoon?\r\n";
+    let path = "/cdn-cgi/local/email?from=ada@example.com&to=notes@example.com";
+    let delivered = app.send("POST", path, &[("content-type", "message/rfc822")], raw);
+    assert_eq!(delivered.status, 200, "{}", delivered.body);
+    let notes: Vec<Value> = app.get("/notes").json();
+    assert!(notes.iter().any(|n| n["body"] == "mail from ada@example.com: Lunch \u{1F35D}?"), "{notes:?}");
+}

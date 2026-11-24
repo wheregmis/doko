@@ -82,6 +82,31 @@ struct Bindings {
     queues: BTreeMap<String, Queue>,
     #[serde(default, rename = "do")]
     durable: BTreeMap<String, Do>,
+    #[serde(default)]
+    email: BTreeMap<String, Email>,
+}
+
+/// A `send_email` binding. The optional fields restrict who it may send to or from.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Email {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_destination_addresses: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_sender_addresses: Option<Vec<String>>,
+    /// `true` makes `wrangler dev` send real mail instead of logging it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<bool>,
+}
+
+// Like `Bound`, for the wrangler tables that call the binding `name`.
+#[derive(Serialize)]
+struct Named<T> {
+    name: String,
+    #[serde(flatten)]
+    inner: T,
 }
 
 /// A Durable Object class exported by this worker with `doko::app!(App, objects: [Class])`.
@@ -200,6 +225,8 @@ struct Resources {
     queues: Option<Queues>,
     #[serde(skip_serializing_if = "Option::is_none")]
     durable_objects: Option<DurableObjects>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    send_email: Vec<Named<Email>>,
 }
 
 #[derive(Serialize)]
@@ -270,6 +297,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             b.r2.extend(e.bindings.r2.clone());
             b.d1.extend(e.bindings.d1.clone());
             b.durable.extend(e.bindings.durable.clone());
+            b.email.extend(e.bindings.email.clone());
         }
         let at = if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") };
         check_binding_names(&b).map_err(|e| format!("doko.toml{at}: {e}"))?;
@@ -293,6 +321,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             d1_databases: bound(&b.d1),
             queues,
             durable_objects,
+            send_email: b.email.iter().map(|(k, e)| Named { name: k.clone(), inner: e.clone() }).collect(),
         };
         Ok((r, b))
     };
@@ -311,6 +340,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         all.r2.extend(b.r2);
         all.d1.extend(b.d1);
         all.durable.extend(b.durable.clone());
+        all.email.extend(b.email);
         all.queues.extend(b.queues);
         classes.extend(b.durable.into_values().map(|d| d.class_name));
         env.insert(name.as_str(), r);
@@ -436,7 +466,7 @@ fn check_resources(b: &Bindings) -> Result<(), String> {
 }
 
 fn check_binding_names(b: &Bindings) -> Result<(), String> {
-    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys()).chain(b.durable.keys());
+    let names = b.kv.keys().chain(b.r2.keys()).chain(b.d1.keys()).chain(b.queues.keys()).chain(b.durable.keys()).chain(b.email.keys());
     let mut seen = BTreeSet::new();
     for name in names {
         let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
@@ -455,16 +485,17 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
 }
 
 fn bindings_rs(b: &Bindings) -> Option<String> {
-    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty() {
+    if b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty() && b.email.is_empty() {
         return None;
     }
     let mut s = format!("{BINDINGS_HEADER}\n");
-    let kinds: [(&str, Vec<&String>); 5] = [
+    let kinds: [(&str, Vec<&String>); 6] = [
         ("Kv", b.kv.keys().collect()),
         ("R2", b.r2.keys().collect()),
         ("D1", b.d1.keys().collect()),
         ("Queue", b.queues.keys().collect()),
         ("Do", b.durable.keys().collect()),
+        ("Email", b.email.keys().collect()),
     ];
     for (kind, names) in kinds {
         for name in names {
@@ -588,6 +619,18 @@ mod tests {
         assert_eq!(back["migrations"][2]["new_sqlite_classes"][0].as_str(), Some("Counter"));
         assert!(err("[do.C]\nclass_name = \"my-class\"\n").contains("Rust type name"));
         assert!(render_over(APP, "not toml =").is_err());
+    }
+
+    #[test]
+    fn renders_email_bindings() {
+        let o = out("[email.EMAIL]\n[env.prod.email.EMAIL]\nallowed_sender_addresses = [\"hi@example.com\"]\n");
+        let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
+        assert_eq!(v["send_email"][0]["name"].as_str(), Some("EMAIL"));
+        assert!(v["send_email"][0].get("allowed_sender_addresses").is_none());
+        let prod = &v["env"]["prod"]["send_email"][0];
+        assert_eq!(prod["allowed_sender_addresses"][0].as_str(), Some("hi@example.com"));
+        assert!(o.bindings_rs.unwrap().contains("pub const EMAIL: doko::EmailBinding"));
+        assert!(err("[email.EMAIL]\nto = \"x\"\n").contains("to"));
     }
 
     #[test]

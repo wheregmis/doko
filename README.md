@@ -11,7 +11,7 @@ A batteries-included Rust framework for Cloudflare Workers.</p>
 
 A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
 
-doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects and auth all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth and email all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
 
 **What's in the basket**
 
@@ -24,7 +24,8 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Jobs and cron](#background-jobs-and-cron-tasks) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
 | [Durable Objects](#durable-objects-and-rate-limits) | a `DurableObject` trait, typed stubs, and a per-route rate limiter built on them |
 | [Auth](#auth) | cookie sessions, JWTs, password hashing, `.require_auth()` |
-| [Generators](#generators) | `doko new`, `generate controller \| job \| migration` |
+| [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
+| [Generators](#generators) | `doko new`, `generate controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
 doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See [ROADMAP.md](ROADMAP.md) for the roadmap.
@@ -98,6 +99,12 @@ doko generate job send_welcome
 ```
 
 This writes `src/jobs/send_welcome.rs` (a `SendWelcome` job) and registers it in `src/jobs/mod.rs`. Add `mod jobs;` once, and return `jobs::jobs()` from `Hooks::jobs`.
+
+```bash
+doko generate mailer welcome
+```
+
+This writes `src/mailers/welcome.rs`, a function that builds a `Message`, and declares it in `src/mailers/mod.rs`. Add `mod mailers;` once. See [Email](#email).
 
 ## Storage: KV, R2, D1
 
@@ -314,6 +321,48 @@ async fn api_me(Claims(user): Claims<User>) -> Json<User> { Json(user) }   // 40
 - **Passwords.** `auth::hash_password` and `verify_password` use PBKDF2-SHA256 with a random salt at 100,000 iterations (the Workers maximum), in the runtime's native crypto.
 - **`.require_auth()`** applies to the routes added before it. Put `.rate_limit(..)` on login and signup routes: see [examples/hello/src/controllers/auth.rs](examples/hello/src/controllers/auth.rs).
 
+## Email
+
+```toml
+[email.EMAIL]             # optional: destination_address, allowed_destination_addresses,
+                          # allowed_sender_addresses, remote (same as wrangler's send_email)
+```
+
+```rust
+use doko::{InboundEmail, Message};
+
+// Sending. Returns the message id.
+ctx.mail(EMAIL)?.send(&Message {
+    from: "hello@example.com".into(),
+    to: vec![user.email],
+    subject: "Welcome".into(),
+    text: Some("Thanks for signing up.".into()),
+    html: Some("<p>Thanks for signing up.</p>".into()),
+    reply_to: None,
+}).await?;
+
+// Receiving.
+impl Hooks for App {
+    async fn on_email(ctx: Ctx, email: InboundEmail) -> Result<()> {
+        let body = email.read().await?;                  // subject, text, html: decoded
+        save(&ctx, &email.from(), body.subject, body.text).await
+        // also: email.to(), email.header("message-id"), email.reject("why"), email.forward("me@example.com")
+    }
+    // ...
+}
+```
+
+- **Sending** needs a domain onboarded to Cloudflare Email Sending (`wrangler email sending enable example.com`), and `from` must be on it. It is for transactional mail, not newsletters.
+- **Receiving** needs an Email Routing rule that delivers an address to this worker. Without an `on_email`, mail is rejected. An `Err` fails the delivery, so the sending server retries or bounces. doko logs the sender and recipient of every inbound mail.
+- **Escape user input** before putting it in `html`. `send` refuses line breaks in addresses and the subject.
+- **Locally,** `doko dev` logs sent mail instead of sending it (set `remote = true` on the binding to send for real). To deliver a test mail, POST a raw message, with a `Message-ID` header, to wrangler's local endpoint:
+
+```bash
+curl 'localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=notes@example.com' --data-binary @mail.eml
+```
+
+`Mailer::raw()` and `InboundEmail::raw()` give the `worker` types, for attachments, cc/bcc, custom headers and replies.
+
 ## Integration tests
 
 `doko::test::App` runs your worker under `wrangler dev` (on a free port, with empty local state) and gives you an HTTP client. Enable it for tests only:
@@ -336,4 +385,4 @@ fn creates_notes() {
 
 `app.send(method, path, headers, body)` sends any request, and `res.header("set-cookie")` reads a response header.
 
-Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).
+Run with `cargo test -- --ignored`. This needs Node, and startup includes a release build, so share one `App` across the asserts in a test. Queues, D1, KV, Durable Objects, email and the Cache API all run locally. See [examples/hello/tests/app.rs](examples/hello/tests/app.rs).

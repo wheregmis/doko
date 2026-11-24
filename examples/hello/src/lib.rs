@@ -1,10 +1,11 @@
 mod bindings;
 mod controllers;
 mod jobs;
+mod mailers;
 mod tasks;
 
 use doko::{
-    Ctx, Hooks, Jobs, RateLimit, RateLimiter, Result, RouterExt, Tasks,
+    Ctx, Hooks, InboundEmail, Jobs, RateLimit, RateLimiter, Result, RouterExt, Tasks,
     axum::{Json, Router, routing::get},
 };
 use serde::Deserialize;
@@ -38,6 +39,14 @@ impl Hooks for App {
 
     fn tasks() -> Tasks {
         Tasks::new().add("prune", tasks::prune)
+    }
+
+    /// Mail routed to this worker becomes a note. doko logs the sender and recipient of each one.
+    async fn on_email(ctx: Ctx, email: InboundEmail) -> Result<()> {
+        let body = email.read().await?;
+        let note = format!("mail from {}: {}", email.from(), body.subject.unwrap_or_default());
+        ctx.db(bindings::DB)?.run("INSERT INTO notes (body) VALUES (?1)", (&note,)).await?;
+        ctx.cache().purge_tag(bindings::CACHE, controllers::notes::TAG).await
     }
 }
 
