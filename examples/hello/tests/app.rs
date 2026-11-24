@@ -186,6 +186,13 @@ fn websockets() {
 
 #[test]
 #[ignore = "starts wrangler dev"]
+fn wrangler_vars() {
+    let app = doko::test::App::start(&[]);
+    assert_eq!(app.get("/motto").body, "carry it with one strap");
+}
+
+#[test]
+#[ignore = "starts wrangler dev"]
 fn times_out_slow_requests() {
     let app = doko::test::App::start(&[]);
     let started = Instant::now();

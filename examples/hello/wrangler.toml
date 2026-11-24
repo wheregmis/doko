@@ -20,6 +20,7 @@ crons = ["*/30 * * * *"]
 [vars]
 DOKO_ENV = "dev"
 DOKO_REQUEST_TIMEOUT_SECS = "10"
+MOTTO = "carry it with one strap"
 
 [vars.DOKO_CONFIG]
 contact_to = "owner@example.com"
@@ -76,12 +77,16 @@ localConnectionString = "postgres://doko:doko@127.0.0.1:5433/doko_hello"
 [ai]
 binding = "AI"
 
+[observability]
+enabled = true
+
 [env.prod.triggers]
 crons = ["0 3 * * *"]
 
 [env.prod.vars]
 DOKO_ENV = "prod"
 DOKO_REQUEST_TIMEOUT_SECS = "10"
+MOTTO = "carry it with one strap"
 
 [env.prod.vars.DOKO_CONFIG]
 contact_to = "owner@example.com"

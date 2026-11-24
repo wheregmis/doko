@@ -15,6 +15,15 @@ contact_to = "owner@example.com"
 [env.prod.config]
 greeting = "hello from doko (prod)"
 
+# Any wrangler setting doko has no table of its own for goes here and is copied into wrangler.toml as
+# written: custom domains (`routes`), `assets`, `placement`, `limits`, service bindings.
+# [env.<name>.wrangler] is deep-merged over it.
+[wrangler.vars]
+MOTTO = "carry it with one strap"   # plain vars, read with ctx.var("MOTTO")
+
+# [env.prod.wrangler]
+# routes = [{ pattern = "hello.example.com", custom_domain = true }]
+
 # Cron tasks: name = schedule. Handlers are registered in Hooks::tasks.
 [tasks]
 prune = "*/30 * * * *"

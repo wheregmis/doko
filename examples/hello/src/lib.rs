@@ -28,6 +28,7 @@ impl Hooks for App {
         Router::new()
             .route("/", get(index))
             .route("/health", get(health))
+            .route("/motto", get(motto))
             .route("/token-length", get(token_length))
             // 3 requests a minute per API key (per client IP without one), counted in a Durable Object; then 429.
             .merge(
@@ -62,6 +63,11 @@ impl Hooks for App {
 
 async fn index(ctx: Ctx) -> Result<String> {
     Ok(ctx.config::<Config>()?.greeting)
+}
+
+/// A plain var from doko.toml's `[wrangler.vars]`.
+async fn motto(ctx: Ctx) -> Result<String> {
+    ctx.var("MOTTO").ok_or_else(doko::Error::not_found)
 }
 
 async fn language(headers: HeaderMap) -> String {
