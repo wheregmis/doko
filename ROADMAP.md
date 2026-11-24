@@ -30,14 +30,11 @@ doko is a Rails/Loco-style framework for Cloudflare Workers in Rust, built on `w
 | 13. `generate auth` | `doko generate auth`: users migration, `controllers/auth.rs` (register, verify, login, logout, me, forgot and reset password), `mailers/auth.rs`, `tests/auth.rs`; adds the missing bindings, `APP_URL`, a dev `SESSION_SECRET` and the `src/lib.rs` wiring; `auth::token` / `auth::read_token` (signed, purpose-bound, expiring) | D1 only (no `--pg`); a reset doesn't close sessions already open; no dev secret on Windows (a `todo:` is printed) |
 | 14. `generate scaffold` | `doko generate scaffold post title:string ..`: migration, `models/post.rs` as plain SQL functions, CRUD controller, test; `Page` extractor and `Paged<T>` response (`?page=&per_page=`, capped at 100); `doko::bool_from_sql` for boolean columns | D1 only; five field types, all `NOT NULL` (no optional fields, references or indexes); regular English plurals only; at most 15 fields; offset pagination with a `COUNT(*)`, so very large tables want a cursor instead |
 | 15. Tests | `doko test` (regenerates, then `cargo test -- --include-ignored`), `App::start_with_seeds`, `app.client()` with a cookie jar, `app.mail_to(..)`, `app.wait_for_job(..)`, `app.output()`; `App`s start one at a time, so parallel tests no longer collide on the build | Mail is read from wrangler's log output, which is not a stable format; seeds are D1 only; still one release build and one `wrangler dev` per `App` |
+| 16. CLI | `doko routes`, `doko doctor [--env]`, `doko db seed` / `reset`, `doko console` (D1 prompt, `--pg` for psql), `[secrets] required` (warned about in `dev`, reported by `doctor`, enforced by `deploy`), `doko deploy` applies pending D1 migrations first and refuses on a missing Hyperdrive id | `routes` reads source text (no `.nest` prefixes, no routes built by loops or macros); the console runs one statement per line with a wrangler start each; secrets can only be warned about on a first deploy; Postgres migrations are not applied on deploy; the pending-migration check reads wrangler's "No migrations to apply" text |
 
 ## Next
 
-The products are covered; the next phases build the framework layer around them, where Rails and Loco are still ahead. Each ends, as before, with the `hello` example using the feature and an integration test through `doko::test::App`.
-
-| Phase | Goal | Scope |
-|---|---|---|
-| 16. CLI | The tooling around an app | `doko routes`, `doko doctor` (wrangler, Node, wasm target, `psql`, missing ids and secrets per env), `doko db seed\|reset`, `doko console` (a SQL shell), `[secrets] required = [..]` checked before deploy, pending migrations applied (or refused) on deploy |
+Phases 11 to 16 built the framework layer around the products: an escape hatch to wrangler, request handling, the `auth` and `scaffold` generators, test helpers and the CLI. Every planned phase has shipped. What comes next is the backlog below, and whatever real apps turn up.
 
 ## Backlog
 

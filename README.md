@@ -27,6 +27,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
+| [The `doko` command](#the-doko-command) | `routes`, `doctor`, `db seed` and `reset`, a SQL `console`, and a deploy that checks secrets and migrates first |
 | [Generators](#generators) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
 
@@ -49,6 +50,31 @@ doko = { package = "doko-rs", version = "0.1" }
 To run the example from a checkout instead: `cargo install --path crates/doko-cli && cd examples/hello && doko dev`.
 
 `doko dev` / `doko deploy` regenerate `wrangler.toml` from `doko.toml`, then run wrangler. `doko config` only regenerates. Extra args go to wrangler.
+
+## The `doko` command
+
+| Command | What |
+|---|---|
+| `doko dev` | regenerate, warn about required secrets missing from `.dev.vars`, then `wrangler dev` |
+| `doko deploy [--env prod]` | regenerate, check the secrets and Hyperdrive ids, apply pending D1 migrations, then `wrangler deploy` |
+| `doko test` | every test, including the ones that start `wrangler dev` |
+| `doko routes` | the app's routes, with methods and where each is defined |
+| `doko doctor [--env prod]` | checks Node, the wasm target, `psql` (if you use Postgres), doko.toml and local secrets; with `--env`, the deployed secrets too |
+| `doko migrate` | apply D1 migrations (`--pg` for Postgres) |
+| `doko db seed` | run `seeds/*.sql` against the local database (`--remote --env prod` for a deployed one) |
+| `doko db reset` | delete the local D1 data, then migrate and seed again. Local only |
+| `doko console` | a SQL prompt on the local D1 database (`--remote` for a deployed one; `--pg` opens `psql`) |
+| `doko generate ..` | see [Generators](#generators) |
+
+**Before a deploy,** `doko deploy` refuses to go on when:
+
+- a secret the app needs is not set for that env. It lists the `wrangler secret put` commands to run;
+- a `[hyperdrive.*]` binding has no `id` for that env;
+- a D1 database still has pending migrations after you were asked to apply them. Wrangler shows what is pending and asks first; `--no-migrate` skips this step.
+
+On a first deploy there is no worker to hold secrets yet, so the secrets can only be warned about. Postgres migrations are not applied by `doko deploy`: run `doko migrate --pg` with `DATABASE_URL` set.
+
+**`doko routes`** reads the source, it doesn't run the app. A path under `.nest("/api", ..)` is listed without its prefix.
 
 ## An app
 
@@ -85,6 +111,13 @@ greeting = "hello"
 [env.prod.config]        # deep-merged over [config] for `--env prod`
 greeting = "hello (prod)"
 ```
+
+```toml
+[secrets]
+required = ["STRIPE_KEY"]     # names only: the values are never in this file
+```
+
+Secrets are set with `wrangler secret put` (or in `.dev.vars` locally). Naming the ones the app can't run without lets `doko dev` warn, `doko doctor` report and `doko deploy` refuse when one is missing. `SESSION_SECRET` is added to the list by itself when the app has a session store.
 
 No `--env` means `dev`, and `[env.dev.config]` applies there. `ctx.env_name()` gives the active env. Use `ctx.var(name)` for plain vars, and `ctx.secret(name)` for secrets set with `wrangler secret put` (or `.dev.vars` locally). Never put secrets in doko.toml.
 

@@ -3,9 +3,11 @@
 mod config;
 mod generate;
 mod pg;
+mod tools;
 
 use std::{
     fs,
+    io::{BufRead, Write},
     path::Path,
     process::{Command, ExitCode},
 };
@@ -15,7 +17,13 @@ usage:
   doko new <app>                      scaffold a new app in ./<app>
   doko config                         regenerate wrangler.toml (and src/bindings.rs) from doko.toml
   doko dev [wrangler args]            regenerate, then `wrangler dev`
-  doko deploy [wrangler args]         regenerate, then `wrangler deploy` (e.g. --env prod)
+  doko deploy [wrangler args]         regenerate, check the required secrets, apply pending D1 migrations,
+                                      then `wrangler deploy` (e.g. --env prod; --no-migrate skips the migrations)
+  doko routes                         list the app's routes, read from src/
+  doko doctor [--env <name>]          check the tools and config; with --env, the deployed secrets too
+  doko db seed [DB] [wrangler args]   run seeds/*.sql against a D1 database (local unless --remote)
+  doko db reset                       delete the local D1 data, then migrate and seed again
+  doko console [DB] [wrangler args]   a SQL prompt on a D1 database (local unless --remote); --pg opens psql
   doko test [cargo test args]         regenerate, then run every test, including the ones that start
                                       `wrangler dev` (`cargo test -- --include-ignored`)
   doko migrate [wrangler args]        apply D1 migrations to every D1 binding (local unless --remote)
@@ -84,6 +92,111 @@ fn local_database(bindings: &std::collections::BTreeMap<String, Option<String>>,
     local.clone().ok_or_else(|| format!("[hyperdrive.{name}] has no local_connection_string; set it, or set DATABASE_URL"))
 }
 
+/// The D1 binding a command is about: the one named first in `args`, or the only one. Returns it
+/// with the remaining arguments, which go to wrangler.
+fn pick_d1<'a>(dbs: &'a [String], args: &'a [&'a str]) -> Result<(&'a str, &'a [&'a str]), String> {
+    match (args.first().filter(|a| !a.starts_with('-')), dbs) {
+        (Some(name), _) => match dbs.iter().find(|d| d == name) {
+            Some(db) => Ok((db, &args[1..])),
+            None => Err(format!("`{name}` is not a [d1.<BINDING>] in doko.toml")),
+        },
+        (None, [only]) => Ok((only, args)),
+        (None, []) => Err("doko.toml declares no [d1.<BINDING>] databases".into()),
+        (None, _) => Err(format!("several D1 bindings; name one of: {}", dbs.join(", "))),
+    }
+}
+
+/// `--local` unless the arguments say `--remote`.
+fn d1_target<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = args.to_vec();
+    if !args.contains(&"--remote") {
+        out.push("--local");
+    }
+    out
+}
+
+/// Runs `seeds/*.sql` against `db`, in name order.
+fn seed(db: &str, args: &[&str]) -> Result<(), String> {
+    let mut files: Vec<String> = fs::read_dir("seeds")
+        .map(|dir| dir.filter_map(|e| Some(e.ok()?.path().display().to_string())).filter(|f| f.ends_with(".sql")).collect())
+        .unwrap_or_default();
+    files.sort();
+    if files.is_empty() {
+        println!("no seeds/*.sql to run");
+    }
+    for file in &files {
+        wrangler(&[&["d1", "execute", db, "--yes", "--file", file][..], &d1_target(args)].concat())?;
+    }
+    Ok(())
+}
+
+/// A SQL prompt: each line is run with `wrangler d1 execute`.
+// shortcut: one wrangler start per statement (about a second), and one statement per line;
+// fine for looking around, not for bulk work.
+fn console(db: &str, args: &[&str]) -> Result<(), String> {
+    let target = d1_target(args);
+    let place = if target.contains(&"--remote") { "REMOTE" } else { "local" };
+    println!("{db} ({place}). One SQL statement per line; `exit` or Ctrl-D to leave.");
+    let stdin = std::io::stdin();
+    loop {
+        print!("{db}> ");
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            println!();
+            return Ok(());
+        }
+        match line.trim() {
+            "" => {}
+            "exit" | "quit" | "\\q" => return Ok(()),
+            sql => {
+                // A failed statement is reported by wrangler; the prompt stays open.
+                let _ = wrangler(&[&["d1", "execute", db, "--command", sql][..], &target].concat());
+            }
+        }
+    }
+}
+
+/// What must be true before a deploy: the required secrets are set, every Hyperdrive binding
+/// points somewhere, and the database has the migrations the new code expects.
+fn before_deploy(out: &config::Output, env: &str, migrate: bool) -> Result<(), String> {
+    let known = out.d1_by_env.get(env).ok_or_else(|| format!("env `{env}` is not defined in doko.toml"))?;
+    let env_args: Vec<&str> = if env == "dev" { vec![] } else { vec!["--env", env] };
+    if let Some(unset) = out.hyperdrive_without_id.get(env).filter(|b| !b.is_empty()) {
+        return Err(format!("[hyperdrive.{}] has no `id` for env `{env}`; set it from `wrangler hyperdrive create`", unset.join("|")));
+    }
+    if !out.secrets.is_empty() {
+        match tools::deployed_secrets(env) {
+            // A first deploy has no worker to hold secrets yet, so this can only warn.
+            None => eprintln!("warning: could not list the deployed secrets; make sure these are set: {}", out.secrets.join(", ")),
+            Some(listed) => {
+                let missing = tools::missing_secrets(&out.secrets, &listed);
+                if !missing.is_empty() {
+                    let puts: Vec<String> = missing.iter().map(|s| format!("  wrangler secret put {s} {}", env_args.join(" "))).collect();
+                    return Err(format!("not deploying: required secrets are not set for env `{env}`:\n{}", puts.join("\n")));
+                }
+            }
+        }
+    }
+    if !migrate {
+        return Ok(());
+    }
+    for db in known.iter().filter(|db| out.d1_dirs.get(*db).is_some_and(|dir| Path::new(dir).is_dir())) {
+        // Wrangler lists what is pending and asks before applying it.
+        wrangler(&[&["d1", "migrations", "apply", db, "--remote"][..], &env_args].concat())?;
+        let listed = Command::new("npx")
+            .args(["--yes", WRANGLER, "d1", "migrations", "list", db, "--remote"])
+            .args(&env_args)
+            .output()
+            .map_err(|e| format!("running npx {WRANGLER}: {e}"))?;
+        // Declining wrangler's prompt leaves migrations pending, and new code on an old schema fails at runtime.
+        if !String::from_utf8_lossy(&listed.stdout).contains("No migrations to apply") {
+            return Err(format!("not deploying: `{db}` still has pending migrations. Apply them, or pass --no-migrate to deploy anyway"));
+        }
+    }
+    Ok(())
+}
+
 /// `cargo test` arguments that also run the `#[ignore]`d tests, which are the ones that start `wrangler dev`.
 fn test_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let split = args.iter().position(|a| *a == "--").unwrap_or(args.len());
@@ -120,9 +233,73 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("wrote wrangler.toml");
             Ok(())
         }
-        ["dev" | "deploy", ..] => {
-            write_config()?;
+        ["dev", ..] => {
+            let out = write_config()?;
+            let dev = fs::read_to_string(".dev.vars").unwrap_or_default();
+            let set = tools::dev_vars(&dev);
+            for secret in out.secrets.iter().filter(|s| !set.contains(&s.as_str())) {
+                eprintln!("warning: secret {secret} is not in .dev.vars; add `{secret}=..`");
+            }
             wrangler(args)
+        }
+        ["deploy", rest @ ..] => {
+            let out = write_config()?;
+            let env = migrate_env(rest)?;
+            let args: Vec<&str> = strs.iter().copied().filter(|a| *a != "--no-migrate").collect();
+            // A dry run changes nothing, so it needs no checks.
+            if !rest.contains(&"--dry-run") {
+                before_deploy(&out, env, !rest.contains(&"--no-migrate"))?;
+            }
+            wrangler(&args)
+        }
+        ["routes"] => {
+            tools::print_routes(&tools::routes(Path::new("."))?);
+            Ok(())
+        }
+        ["doctor", rest @ ..] => {
+            let env = match rest {
+                [] => None,
+                _ => Some(migrate_env(rest)?),
+            };
+            let src = fs::read_to_string("doko.toml").map_err(|e| format!("reading doko.toml: {e}"))?;
+            let config = config::render_over(&src, &fs::read_to_string("wrangler.toml").unwrap_or_default());
+            match tools::doctor(Path::new("."), config.as_ref().map_err(String::as_str), env) {
+                0 => Ok(()),
+                n => Err(format!("{n} problem(s) found")),
+            }
+        }
+        ["db", "seed", rest @ ..] => {
+            let out = write_config()?;
+            let (db, rest) = pick_d1(&out.d1, rest)?;
+            seed(db, rest)
+        }
+        ["db", "reset"] => {
+            let out = write_config()?;
+            // Local data only: wrangler dev keeps D1 here. Remote databases are never reset.
+            let local = Path::new(".wrangler/state/v3/d1");
+            if local.exists() {
+                fs::remove_dir_all(local).map_err(|e| format!("deleting {}: {e}", local.display()))?;
+                println!("deleted {}", local.display());
+            }
+            for db in &out.d1_by_env["dev"] {
+                wrangler(&["d1", "migrations", "apply", db, "--local"])?;
+                seed(db, &[])?;
+            }
+            Ok(())
+        }
+        ["db", ..] => Err(USAGE.to_owned()),
+        ["console", "--pg", binding @ ..] => {
+            let url = match std::env::var("DATABASE_URL") {
+                Ok(url) if !url.is_empty() => url,
+                _ => local_database(&write_config()?.hyperdrive, binding)?,
+            };
+            let status = Command::new("psql").arg(&url).status().map_err(|e| format!("running psql: {e}"))?;
+            if status.success() { Ok(()) } else { Err(format!("psql exited with {status}")) }
+        }
+        ["console", rest @ ..] => {
+            let out = write_config()?;
+            let (db, rest) = pick_d1(&out.d1, rest)?;
+            console(db, rest)
         }
         ["test", rest @ ..] => {
             write_config()?;
@@ -250,6 +427,29 @@ mod tests {
         assert!(local_database(&two, &[]).unwrap_err().contains("<A|B>"));
         assert!(local_database(&two, &["A"]).unwrap_err().contains("local_connection_string"));
         assert!(local_database(&Default::default(), &[]).unwrap_err().contains("declares no"));
+    }
+
+    #[test]
+    fn picks_a_d1_binding_and_its_target() {
+        let one = ["DB".to_owned()];
+        let two = ["DB".to_owned(), "LOGS".to_owned()];
+        assert_eq!(pick_d1(&one, &[]).unwrap(), ("DB", &[][..]));
+        assert_eq!(pick_d1(&one, &["--remote", "--env", "prod"]).unwrap(), ("DB", &["--remote", "--env", "prod"][..]));
+        assert_eq!(pick_d1(&two, &["LOGS", "--remote"]).unwrap(), ("LOGS", &["--remote"][..]));
+        assert!(pick_d1(&two, &[]).unwrap_err().contains("DB, LOGS"));
+        assert!(pick_d1(&one, &["OTHER"]).unwrap_err().contains("OTHER"));
+        assert!(pick_d1(&[], &[]).unwrap_err().contains("declares no"));
+        assert_eq!(d1_target(&[]), ["--local"]);
+        assert_eq!(d1_target(&["--remote", "--env", "prod"]), ["--remote", "--env", "prod"]);
+    }
+
+    #[test]
+    fn refuses_to_deploy_without_a_hyperdrive_id() {
+        let out = config::render("[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n[hyperdrive.PG]\n[env.prod]\n").unwrap();
+        assert!(before_deploy(&out, "prod", false).unwrap_err().contains("[hyperdrive.PG] has no `id`"));
+        assert!(before_deploy(&out, "nope", false).unwrap_err().contains("not defined"));
+        let plain = config::render("[app]\nname = \"x\"\ncompatibility_date = \"2026-11-01\"\n").unwrap();
+        assert!(before_deploy(&plain, "dev", false).is_ok(), "nothing to check, nothing run");
     }
 
     #[test]
