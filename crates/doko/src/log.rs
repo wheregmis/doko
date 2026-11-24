@@ -21,7 +21,7 @@ pub(crate) async fn requests(req: Request, next: Next) -> Response {
             "method": method,
             "path": path,
             "status": res.status().as_u16(),
-            "ms": Date::now().as_millis() - start,
+            "ms": Date::now().as_millis().saturating_sub(start),
             "request_id": id_str,
         })
     );

@@ -7,6 +7,8 @@
 //! Tags make purges global: each tag has a version in KV, and that version is part of the cache key,
 //! so [`Cache::purge_tag`] reaches every data center once KV propagates (up to ~60s).
 
+use std::cell::Cell;
+
 use axum::{
     Router,
     body::{Body, HttpBody, to_bytes},
@@ -19,6 +21,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::json;
 // worker::Cache is !Send, so each call creates it inside a SendFuture.
 use worker::{Date, console_error, send::SendFuture};
 
@@ -56,12 +59,7 @@ impl Cache {
     pub async fn put<T: Serialize>(&self, key: &str, value: &T, ttl_secs: u64) -> Result<()> {
         let url = format!("{DATA_ORIGIN}{}", encode(key));
         let body = serde_json::to_string(value)?;
-        SendFuture::new(async move {
-            let mut res = worker::Response::ok(body)?;
-            res.headers_mut().set("cache-control", &format!("public, max-age={ttl_secs}"))?;
-            worker::Cache::default().put(url.as_str(), res).await
-        })
-        .await?;
+        SendFuture::new(put_json_entry(url, body, ttl_secs)).await?;
         Ok(())
     }
 
@@ -75,19 +73,32 @@ impl Cache {
         match self.get(key).await {
             Ok(Some(v)) => return Ok(v),
             Ok(None) => {}
-            Err(e) => console_error!("cache get `{key}`: {}", e.message()),
+            Err(e) => console_error!(
+                "{}",
+                json!({ "level": "error", "component": "cache", "op": "get", "key": key, "error": e.message() })
+            ),
         }
         let value = compute.await?;
+        if ttl_secs == 0 {
+            return Ok(value);
+        }
+        let body = match serde_json::to_string(&value) {
+            Ok(b) => b,
+            Err(e) => {
+                console_error!(
+                    "{}",
+                    json!({ "level": "error", "component": "cache", "op": "serialize", "key": key, "error": e.to_string() })
+                );
+                return Ok(value);
+            }
+        };
         let url = format!("{DATA_ORIGIN}{}", encode(key));
-        let body = serde_json::to_string(&value)?;
         self.ctx.wait_until(async move {
-            let put = async {
-                let mut res = worker::Response::ok(body)?;
-                res.headers_mut().set("cache-control", &format!("public, max-age={ttl_secs}"))?;
-                worker::Cache::default().put(url.as_str(), res).await
-            };
-            if let Err(e) = put.await {
-                console_error!("cache put: {e}");
+            if let Err(e) = put_json_entry(url, body, ttl_secs).await {
+                console_error!(
+                    "{}",
+                    json!({ "level": "error", "component": "cache", "op": "put", "error": e.to_string() })
+                );
             }
         });
         Ok(value)
@@ -102,8 +113,27 @@ impl Cache {
 
     /// Invalidates every response cached under `tag`, in all data centers.
     pub async fn purge_tag(&self, kv: KvBinding, tag: &str) -> Result<()> {
-        self.ctx.kv(kv)?.put(&tag_key(tag), &Date::now().as_millis()).await
+        self.ctx.kv(kv)?.put(&tag_key(tag), &next_tag_version()).await
     }
+}
+
+async fn put_json_entry(url: String, body: String, ttl_secs: u64) -> worker::Result<()> {
+    let mut res = worker::Response::ok(body)?;
+    let headers = res.headers_mut();
+    headers.set("content-type", "application/json")?;
+    headers.set("cache-control", &format!("public, max-age={ttl_secs}"))?;
+    worker::Cache::default().put(url.as_str(), res).await
+}
+
+fn next_tag_version() -> u64 {
+    thread_local! {
+        static LAST_TAG_VERSION: Cell<u64> = const { Cell::new(0) };
+    }
+    LAST_TAG_VERSION.with(|last| {
+        let next = Date::now().as_millis().max(last.get().saturating_add(1));
+        last.set(next);
+        next
+    })
 }
 
 /// How [`RouterExt::cache`] caches responses.
@@ -156,7 +186,10 @@ async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
     let key = match cache_key(&ctx, &policy, &uri).await {
         Ok(k) => k,
         Err(e) => {
-            console_error!("cache key: {}", e.message());
+            console_error!(
+                "{}",
+                json!({ "level": "error", "component": "cache", "op": "key", "uri": uri.to_string(), "error": e.message() })
+            );
             return mark(next.run(req).await, "BYPASS");
         }
     };
@@ -169,27 +202,33 @@ async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
     .await;
     match cached {
         Ok(Some(mut res)) => {
-            let age_ms = Date::now().as_millis().saturating_sub(header_u64(&res, STORED_AT).unwrap_or(0));
-            let headers = res.headers_mut();
-            headers.remove(STORED_AT);
-            headers.remove(CACHE_CONTROL);
-            if let Some(cc) = headers.remove(ORIGINAL_CC) {
-                headers.insert(CACHE_CONTROL, cc);
-            }
-            if age_ms < policy.ttl * 1000 {
-                return mark(res, "HIT");
-            }
-            let fresh_req = clone_get(&req);
-            ctx.wait_until(async move {
-                let fresh = next.run(fresh_req).await;
-                if let Some(stored) = storable(fresh, &policy).await.and_then(|(_, s)| s) {
-                    put(key, stored).await;
+            if let Some(stored_at) = header_u64(&res, STORED_AT) {
+                let age_ms = Date::now().as_millis().saturating_sub(stored_at);
+                let ttl_ms = policy.ttl.saturating_mul(1000);
+                let total_ms = policy.ttl.saturating_add(policy.stale).saturating_mul(1000);
+                if age_ms < ttl_ms {
+                    restore_headers(res.headers_mut());
+                    return mark(res, "HIT");
                 }
-            });
-            return mark(res, "STALE");
+                if policy.stale > 0 && age_ms < total_ms {
+                    restore_headers(res.headers_mut());
+                    let (parts, _) = req.into_parts();
+                    let fresh_req = Request::from_parts(parts, Body::empty());
+                    ctx.wait_until(async move {
+                        let fresh = next.run(fresh_req).await;
+                        if let Some(stored) = storable(fresh, &policy).await.and_then(|(_, s)| s) {
+                            put(key, stored).await;
+                        }
+                    });
+                    return mark(res, "STALE");
+                }
+            }
         }
         Ok(None) => {}
-        Err(e) => console_error!("cache get: {e}"),
+        Err(e) => console_error!(
+            "{}",
+            json!({ "level": "error", "component": "cache", "op": "response_get", "error": e.to_string() })
+        ),
     }
 
     match storable(next.run(req).await, &policy).await {
@@ -202,14 +241,33 @@ async fn respond(policy: Policy, req: Request, next: Next) -> Response<Body> {
     }
 }
 
+fn restore_headers(headers: &mut axum::http::HeaderMap) {
+    headers.remove(STORED_AT);
+    headers.remove(CACHE_CONTROL);
+    if let Some(cc) = headers.remove(ORIGINAL_CC) {
+        headers.insert(CACHE_CONTROL, cc);
+    }
+}
+
+fn cache_control_forbids_caching(cc: &str) -> bool {
+    cc.split(',').any(|directive| {
+        let name = directive.split('=').next().unwrap_or("").trim();
+        name.eq_ignore_ascii_case("private")
+            || name.eq_ignore_ascii_case("no-store")
+            || name.eq_ignore_ascii_case("no-cache")
+    })
+}
+
 /// Splits a cacheable response into (client copy, stored copy). The stored copy is `None` when it
 /// must not be cached. `None` overall means the body failed to read.
 async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body>, Option<Response<Body>>)> {
+    let max_age = policy.ttl.saturating_add(policy.stale);
     let cc = res.headers().get(CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");
     let size = res.body().size_hint().exact();
-    let cacheable = res.status() == StatusCode::OK
+    let cacheable = max_age > 0
+        && res.status() == StatusCode::OK
         && !res.headers().contains_key(SET_COOKIE)
-        && !["private", "no-store", "no-cache"].iter().any(|d| cc.contains(d))
+        && !cache_control_forbids_caching(cc)
         && size.is_some_and(|n| n <= MAX_CACHED_BYTES);
     if !cacheable {
         return Some((res, None));
@@ -223,8 +281,8 @@ async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body
     if let Some(original) = h.remove(CACHE_CONTROL) {
         h.insert(ORIGINAL_CC, original);
     }
-    let max_age = policy.ttl + policy.stale;
-    h.insert(CACHE_CONTROL, HeaderValue::from_str(&format!("public, max-age={max_age}")).ok()?);
+    let cache_control = HeaderValue::from_str(&format!("public, max-age={max_age}")).expect("digits are valid header bytes");
+    h.insert(CACHE_CONTROL, cache_control);
     h.insert(STORED_AT, HeaderValue::from(Date::now().as_millis()));
     Some((Response::from_parts(parts, Body::from(bytes)), Some(stored)))
 }
@@ -235,7 +293,10 @@ async fn put(key: String, stored: Response<Body>) {
         worker::Cache::default().put(key.as_str(), res).await
     };
     if let Err(e) = result.await {
-        console_error!("cache put: {e}");
+        console_error!(
+            "{}",
+            json!({ "level": "error", "component": "cache", "op": "response_put", "error": e.to_string() })
+        );
     }
 }
 
@@ -245,7 +306,9 @@ async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
         Some(_) => uri.to_string(),
         None => format!("https://doko.local{}", uri.path_and_query().map_or("/", |p| p.as_str())),
     };
-    if let Some((kv, tags)) = &policy.tags {
+    if let Some((kv, tags)) = &policy.tags
+        && !tags.is_empty()
+    {
         let kv = ctx.kv(*kv)?;
         let mut versions = Vec::with_capacity(tags.len());
         for tag in tags {
@@ -256,15 +319,6 @@ async fn cache_key(ctx: &Ctx, policy: &Policy, uri: &Uri) -> Result<String> {
         key.push_str(&versions.join("."));
     }
     Ok(key)
-}
-
-fn clone_get(req: &Request) -> Request {
-    let mut r = Request::new(Body::empty());
-    *r.method_mut() = Method::GET;
-    *r.uri_mut() = req.uri().clone();
-    *r.headers_mut() = req.headers().clone();
-    *r.extensions_mut() = req.extensions().clone();
-    r
 }
 
 fn mark(mut res: Response<Body>, status: &'static str) -> Response<Body> {
@@ -282,12 +336,21 @@ fn tag_key(tag: &str) -> String {
 
 /// Percent-encodes everything but unreserved URL characters.
 fn encode(key: &str) -> String {
-    key.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(key.len());
+    for &b in key.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -296,9 +359,22 @@ mod tests {
 
     #[test]
     fn encodes_keys() {
+        assert_eq!(encode(""), "");
         assert_eq!(encode("notes:all"), "notes%3Aall");
         assert_eq!(encode("a b/ü"), "a%20b%2F%C3%BC");
         assert_eq!(encode("ok-_.~9"), "ok-_.~9");
+    }
+
+    #[test]
+    fn detects_cache_control_forbidding_directives() {
+        assert!(cache_control_forbids_caching("private"));
+        assert!(cache_control_forbids_caching("PRIVATE"));
+        assert!(cache_control_forbids_caching("public, No-Store"));
+        assert!(cache_control_forbids_caching("no-cache=\"Set-Cookie\""));
+        assert!(cache_control_forbids_caching("max-age=0, no-cache = \"x\""));
+        assert!(!cache_control_forbids_caching("public, max-age=60"));
+        assert!(!cache_control_forbids_caching("x-private-ext=1"));
+        assert!(!cache_control_forbids_caching(""));
     }
 }
 
