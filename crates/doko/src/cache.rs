@@ -163,7 +163,7 @@ impl Policy {
     }
 }
 
-/// Adds `.cache(policy)` and `.rate_limit(limit)` to routers.
+/// Adds `.cache(policy)`, `.rate_limit(limit)` and `.require_auth()` to routers.
 pub trait RouterExt {
     /// Caches successful GET responses of the routes added so far. Requests with `Authorization`,
     /// and responses that are not 200, set cookies, are `private`/`no-store`, or stream, are never cached.
@@ -173,6 +173,10 @@ pub trait RouterExt {
     /// Limits requests per client IP to the routes added so far, counted together. Over the limit,
     /// they get a 429 with `retry-after`. If the limiter itself fails, they get a 500.
     fn rate_limit(self, limit: crate::RateLimit) -> Self;
+
+    /// Answers 401 on the routes added so far unless the request has a session (see
+    /// [`auth::Session`](crate::auth::Session)) or a valid `Authorization: Bearer` JWT.
+    fn require_auth(self) -> Self;
 }
 
 impl RouterExt for Router<Ctx> {
@@ -182,6 +186,10 @@ impl RouterExt for Router<Ctx> {
 
     fn rate_limit(self, limit: crate::RateLimit) -> Self {
         self.route_layer(middleware::from_fn(move |req: Request, next: Next| crate::durable::limit(limit, req, next)))
+    }
+
+    fn require_auth(self) -> Self {
+        self.route_layer(middleware::from_fn(crate::auth::require))
     }
 }
 

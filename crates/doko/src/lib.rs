@@ -14,6 +14,7 @@
 //!
 //! The app crate must also depend on `worker` directly: worker's `#[event]` macro expands to `::worker::` paths.
 
+pub mod auth;
 mod cache;
 mod durable;
 mod error;

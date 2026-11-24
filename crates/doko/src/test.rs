@@ -46,14 +46,20 @@ pub struct App {
     agent: ureq::Agent,
 }
 
-/// A response: status and body as text.
+/// A response: status, headers and body as text.
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
 impl Response {
+    /// The first header called `name` (lowercase), e.g. `res.header("set-cookie")`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
     /// Parses the body as JSON. Panics if it isn't `T`.
     pub fn json<T: DeserializeOwned>(&self) -> T {
         serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("response is not the expected JSON ({e}): {}", self.body))
@@ -117,22 +123,33 @@ impl App {
     }
 
     pub fn get(&self, path: &str) -> Response {
-        self.read(self.agent.get(self.url_for(path)).call(), path)
+        self.send("GET", path, &[], "")
     }
 
     pub fn delete(&self, path: &str) -> Response {
-        self.read(self.agent.delete(self.url_for(path)).call(), path)
+        self.send("DELETE", path, &[], "")
     }
 
     pub fn post_json<T: Serialize>(&self, path: &str, body: &T) -> Response {
-        let req = self.agent.post(self.url_for(path)).header("content-type", "application/json");
-        self.read(req.send(serde_json::to_string(body).expect("serializing body")), path)
+        self.send("POST", path, &[], &serde_json::to_string(body).expect("serializing body"))
     }
 
-    fn read(&self, res: Result<ureq::http::Response<ureq::Body>, ureq::Error>, path: &str) -> Response {
-        let mut res = res.unwrap_or_else(|e| panic!("request to {path} failed: {e}"));
+    /// Any request, with headers: `app.send("GET", "/me", &[("cookie", cookie)], "")`.
+    /// A non-empty `body` is sent as JSON unless `headers` set a `content-type`.
+    pub fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Response {
+        let mut req = ureq::http::Request::builder().method(method).uri(self.url_for(path));
+        if !body.is_empty() && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+            req = req.header("content-type", "application/json");
+        }
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req.body(body.to_owned()).unwrap_or_else(|e| panic!("building request to {path}: {e}"));
+        let mut res = self.agent.run(req).unwrap_or_else(|e| panic!("request to {path} failed: {e}"));
         let body = res.body_mut().read_to_string().unwrap_or_else(|e| panic!("reading {path} body: {e}"));
-        Response { status: res.status().as_u16(), body }
+        let headers =
+            res.headers().iter().map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
+        Response { status: res.status().as_u16(), headers, body }
     }
 }
 
@@ -190,7 +207,8 @@ mod tests {
 
     #[test]
     fn parses_json_response() {
-        let res = Response { status: 200, body: r#"{"ok":true}"#.into() };
+        let res = Response { status: 200, headers: vec![("x-a".into(), "1".into())], body: r#"{"ok":true}"#.into() };
+        assert_eq!((res.header("x-a"), res.header("x-b")), (Some("1"), None));
         let val: serde_json::Value = res.json();
         assert_eq!(val["ok"], true);
     }

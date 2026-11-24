@@ -5,6 +5,7 @@ use doko::{Ctx, axum::Router};
 pub mod posts;
 pub mod notes;
 pub mod files;
+pub mod auth;
 // doko:modules
 
 pub fn routes() -> Router<Ctx> {
@@ -12,5 +13,6 @@ pub fn routes() -> Router<Ctx> {
     .merge(posts::routes())
     .merge(notes::routes())
     .merge(files::routes())
+    .merge(auth::routes())
     // doko:routes
 }
