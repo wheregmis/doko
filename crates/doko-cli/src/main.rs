@@ -16,6 +16,8 @@ usage:
   doko config                         regenerate wrangler.toml (and src/bindings.rs) from doko.toml
   doko dev [wrangler args]            regenerate, then `wrangler dev`
   doko deploy [wrangler args]         regenerate, then `wrangler deploy` (e.g. --env prod)
+  doko test [cargo test args]         regenerate, then run every test, including the ones that start
+                                      `wrangler dev` (`cargo test -- --include-ignored`)
   doko migrate [wrangler args]        apply D1 migrations to every D1 binding (local unless --remote)
   doko migrate --pg [BINDING]         apply migrations/pg/*.sql with psql, to DATABASE_URL if set,
                                       else to the [hyperdrive.BINDING] local_connection_string
@@ -82,6 +84,17 @@ fn local_database(bindings: &std::collections::BTreeMap<String, Option<String>>,
     local.clone().ok_or_else(|| format!("[hyperdrive.{name}] has no local_connection_string; set it, or set DATABASE_URL"))
 }
 
+/// `cargo test` arguments that also run the `#[ignore]`d tests, which are the ones that start `wrangler dev`.
+fn test_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let split = args.iter().position(|a| *a == "--").unwrap_or(args.len());
+    let (cargo, harness) = args.split_at(split);
+    let mut out = vec!["test"];
+    out.extend(cargo);
+    out.extend(["--", "--include-ignored"]);
+    out.extend(harness.iter().skip(1));
+    out
+}
+
 fn wrangler<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<(), String> {
     let status = Command::new("npx")
         .args(["--yes", WRANGLER])
@@ -110,6 +123,11 @@ fn run(args: &[String]) -> Result<(), String> {
         ["dev" | "deploy", ..] => {
             write_config()?;
             wrangler(args)
+        }
+        ["test", rest @ ..] => {
+            write_config()?;
+            let status = Command::new("cargo").args(test_args(rest)).status().map_err(|e| format!("running cargo test: {e}"))?;
+            if status.success() { Ok(()) } else { Err(format!("cargo test exited with {status}")) }
         }
         ["migrate", "--pg", binding @ ..] => {
             let out = write_config()?;
@@ -232,6 +250,13 @@ mod tests {
         assert!(local_database(&two, &[]).unwrap_err().contains("<A|B>"));
         assert!(local_database(&two, &["A"]).unwrap_err().contains("local_connection_string"));
         assert!(local_database(&Default::default(), &[]).unwrap_err().contains("declares no"));
+    }
+
+    #[test]
+    fn builds_cargo_test_args() {
+        assert_eq!(test_args(&[]), ["test", "--", "--include-ignored"]);
+        assert_eq!(test_args(&["--test", "auth"]), ["test", "--test", "auth", "--", "--include-ignored"]);
+        assert_eq!(test_args(&["login", "--", "--nocapture"]), ["test", "login", "--", "--include-ignored", "--nocapture"]);
     }
 
     #[test]
