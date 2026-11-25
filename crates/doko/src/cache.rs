@@ -391,7 +391,9 @@ async fn storable(res: Response<Body>, policy: &Policy) -> Option<(Response<Body
         && res.status() == StatusCode::OK
         && !res.headers().contains_key(SET_COOKIE)
         && !cache_control_forbids_caching(cc)
-        && size.is_some_and(|n| n <= MAX_CACHED_BYTES);
+        && size.is_some_and(|n| n <= MAX_CACHED_BYTES)
+        // An R2 object streamed by `Bucket::serve` has an empty body here; its bytes never pass through.
+        && res.extensions().get::<crate::storage::RawBody>().is_none();
     if !cacheable {
         return Some((res, None));
     }
