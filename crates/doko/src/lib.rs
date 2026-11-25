@@ -262,6 +262,23 @@ pub async fn dispatch_email<H: Hooks>(
     result.map_err(|e| worker::Error::RustError(e.to_string()))
 }
 
+/// Turns the app's response into the runtime's: an R2 object from [`Bucket::serve`] goes out as its
+/// own stream, costing no Worker CPU however large it is; anything else through worker's conversion.
+#[doc(hidden)]
+pub fn into_raw_response(res: Response<Body>) -> worker::Result<worker::web_sys::Response> {
+    let Some(storage::RawBody(stream)) = res.extensions().get::<storage::RawBody>().cloned() else {
+        return worker::response_to_wasm(res);
+    };
+    let headers = worker::web_sys::Headers::new()?;
+    for (name, value) in res.headers() {
+        headers.append(name.as_str(), &String::from_utf8_lossy(value.as_bytes()))?;
+    }
+    let init = worker::web_sys::ResponseInit::new();
+    init.set_status(res.status().as_u16());
+    init.set_headers(&headers);
+    Ok(worker::web_sys::Response::new_with_opt_readable_stream_and_init(Some(&*stream), &init)?)
+}
+
 #[doc(hidden)]
 pub async fn fetch<H: Hooks>(req: HttpRequest, env: Env, exec: Context) -> worker::Result<Response<Body>> {
     dispatch_fetch(build_router::<H>(), req, env, exec).await
@@ -347,13 +364,13 @@ macro_rules! app {
             req: ::worker::HttpRequest,
             env: ::worker::Env,
             ctx: ::worker::Context,
-        ) -> ::worker::Result<$crate::axum::http::Response<$crate::axum::body::Body>> {
+        ) -> ::worker::Result<::worker::web_sys::Response> {
             ::std::thread_local! {
                 static ROUTER: ::std::cell::OnceCell<$crate::axum::Router<$crate::Ctx>> =
                     const { ::std::cell::OnceCell::new() };
             }
             let router = ROUTER.with(|c| c.get_or_init($crate::build_router::<$app>).clone());
-            $crate::dispatch_fetch(router, req, env, ctx).await
+            $crate::into_raw_response($crate::dispatch_fetch(router, req, env, ctx).await?)
         }
 
         #[::worker::event(scheduled)]

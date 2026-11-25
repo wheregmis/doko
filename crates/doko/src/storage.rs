@@ -108,6 +108,12 @@ impl Kv {
     }
 }
 
+/// An R2 object's own body stream, carried as a response extension so the runtime sends it as is.
+/// Piping it through the axum body instead runs every chunk through wasm, and a large object
+/// then exceeds the Worker's CPU limit and is cut off mid-download.
+#[derive(Clone)]
+pub(crate) struct RawBody(pub(crate) SendWrapper<worker::web_sys::ReadableStream>);
+
 /// The part size of streamed uploads. R2 needs at least 5 MiB, and equal parts except the last.
 const PART_BYTES: usize = 8 * 1024 * 1024;
 
@@ -126,12 +132,12 @@ impl Bucket {
             if let Some(ct) = obj.http_metadata().content_type {
                 res = res.header(CONTENT_TYPE, ct);
             }
-            let body = match obj.body().map(|b| b.response_body()).transpose()? {
-                Some(ResponseBody::Stream(s)) => Body::new(worker::Body::new(s)),
-                Some(ResponseBody::Body(bytes)) => Body::from(bytes),
-                _ => Body::empty(),
-            };
-            Ok(res.body(body)?)
+            Ok(match obj.body().map(|b| b.response_body()).transpose()? {
+                // The body stays empty here; `into_raw_response` hands the runtime R2's stream.
+                Some(ResponseBody::Stream(s)) => res.extension(RawBody(SendWrapper::new(s))).body(Body::empty())?,
+                Some(ResponseBody::Body(bytes)) => res.body(Body::from(bytes))?,
+                _ => res.body(Body::empty())?,
+            })
         })
         .await
     }
