@@ -7,11 +7,14 @@
 <p align="center">
   <a href="https://crates.io/crates/doko-rs"><img src="https://img.shields.io/crates/v/doko-rs.svg" alt="crates.io"></a>
   <a href="https://docs.rs/doko-rs"><img src="https://docs.rs/doko-rs/badge.svg" alt="docs.rs"></a>
+  <a href="https://wheregmis.github.io/doko/"><img src="https://img.shields.io/badge/docs-wheregmis.github.io%2Fdoko-blue" alt="Documentation"></a>
   <a href="#license"><img src="https://img.shields.io/crates/l/doko-rs.svg" alt="License: MIT OR Apache-2.0"></a>
 </p>
 
 <p align="center"><b>Put everything in the basket. Carry it with one strap.</b><br>
 A batteries-included Rust framework for Cloudflare Workers.</p>
+
+<p align="center"><b><a href="https://wheregmis.github.io/doko/">Read the documentation →</a></b></p>
 
 ---
 
