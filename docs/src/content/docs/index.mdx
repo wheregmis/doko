@@ -1,0 +1,66 @@
+---
+title: doko
+description: A batteries-included Rust framework for Cloudflare Workers.
+template: splash
+hero:
+  tagline: Put everything in the basket. Carry it with one strap. A batteries-included Rust framework for Cloudflare Workers.
+  image:
+    file: ../../assets/doko.svg
+  actions:
+    - text: Get started
+      link: /doko/getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/wheregmis/doko
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
+
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth, email, Postgres and AI all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+
+<CardGrid>
+	<Card title="One config file" icon="document">
+		Declare bindings, environments, secrets and cron schedules in `doko.toml`. doko generates `wrangler.toml` and a typed `src/bindings.rs`.
+	</Card>
+	<Card title="axum on Workers" icon="rocket">
+		Write ordinary axum handlers that take a `Ctx`, return `doko::Result`, and get JSON errors, request logs and secure headers for free.
+	</Card>
+	<Card title="Batteries included" icon="puzzle">
+		KV, R2, D1, Postgres, caching, queues, cron, Durable Objects, auth, email and Workers AI, all behind typed APIs.
+	</Card>
+	<Card title="A CLI that checks first" icon="seti:shell">
+		`doko dev`, `doko deploy`, generators, migrations, a SQL console, and a deploy that refuses to ship without its secrets.
+	</Card>
+</CardGrid>
+
+## Quick start
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install doko-cli
+doko new my-app && cd my-app && doko dev
+```
+
+## What's in the basket
+
+| | |
+|---|---|
+| [Routing and handlers](/doko/guides/handlers/) | axum routers, a `Ctx` extractor, JSON errors, request logs, validation, CORS and secure headers, an error hook |
+| [Config and environments](/doko/guides/configuration/) | typed config merged per env, vars and secrets, any wrangler setting through `[wrangler]` |
+| [Storage](/doko/guides/storage/) | typed KV, R2 and D1 bindings, plus D1 migrations |
+| [Cache](/doko/guides/cache/) | response caching with stale-while-revalidate and global tag purges |
+| [Jobs and cron](/doko/guides/jobs-and-cron/) | Queues-backed jobs with retries and a dead-letter queue, named cron tasks |
+| [Durable Objects](/doko/guides/durable-objects/) | a `DurableObject` trait, typed stubs, and a per-route rate limiter built on them |
+| [Auth](/doko/guides/auth/) | cookie sessions, JWTs, password hashing, `.require_auth()` |
+| [Email](/doko/guides/email/) | sending through a typed binding, receiving in `Hooks::on_email` |
+| [Postgres](/doko/guides/postgres/) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
+| [Workers AI](/doko/guides/workers-ai/) | `ctx.ai()` with serde types, and streamed answers |
+| [The `doko` command](/doko/reference/cli/) | `routes`, `doctor`, `db seed` and `reset`, a SQL `console`, and a deploy that checks secrets and migrates first |
+| [Generators](/doko/guides/generators/) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
+| [Integration tests](/doko/guides/testing/) | `doko::test` runs your worker under `wrangler dev` |
+
+doko is built on [`worker`](https://crates.io/crates/worker) and axum, in the spirit of Rails and Loco. See the [roadmap](https://github.com/wheregmis/doko/blob/master/ROADMAP.md) for what's next.
