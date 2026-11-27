@@ -20,7 +20,7 @@ A batteries-included Rust framework for Cloudflare Workers.</p>
 
 A **doko** (डोको) is the woven bamboo basket carried across the hills of Nepal. Firewood, grain, a week of supplies: whatever the load, it all goes in the basket, and a single strap, the *namlo*, carries the weight.
 
-doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth, email, Postgres and AI all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
+doko works the same way for Rust on Cloudflare Workers. Routing, config, storage, caching, background jobs, cron, Durable Objects, auth, email, Postgres, AI and analytics all go in the basket. You carry one `doko.toml`, and doko writes the `wrangler.toml`, typed bindings and glue code you'd otherwise maintain by hand.
 
 **What's in the basket**
 
@@ -36,6 +36,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 | [Email](#email) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](#postgres) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](#workers-ai) | `ctx.ai()` with serde types, and streamed answers |
+| [Analytics Engine](#analytics-engine) | typed data points through `ctx.analytics()`, and SQL reads |
 | [The `doko` command](#the-doko-command) | `routes`, `doctor`, `db seed` and `reset`, a SQL `console`, and a deploy that checks secrets and migrates first |
 | [Generators](#generators) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](#integration-tests) | `doko::test` runs your worker under `wrangler dev` |
@@ -692,6 +693,37 @@ async fn stream(ctx: Ctx, Json(q): Json<Question>) -> Result<Response<Body>> {
 - **`stream`** adds `"stream": true` and answers with server-sent events, one `data: {..}` line per piece and a final `data: [DONE]`.
 - **There is no local AI.** Inference runs on Cloudflare even under `doko dev`, so it needs `wrangler login` and is billed to your account.
 - `ctx.ai()?.raw()` gives the `worker` binding, for image and audio models.
+
+## Analytics Engine
+
+```toml
+[analytics.USAGE]
+dataset = "usage"          # created by the first write; letters, digits and _
+
+[env.prod.analytics.USAGE]
+dataset = "usage_prod"
+```
+
+```rust
+use doko::{DataPoint, analytics};
+
+// Writing. Returns at once: the runtime sends points after the response.
+ctx.analytics(USAGE)?.write(&DataPoint::new(&version).blob(&version).blob(&country).double(1.0))?;
+
+// Reading, with SQL through Cloudflare's API.
+#[derive(Deserialize)]
+struct Day { day: String, checks: String }
+
+let token = ctx.secret("ANALYTICS_API_TOKEN")?;
+let days: Vec<Day> = analytics::query(&account_id, &token, "SELECT toDate(timestamp) AS day, \
+    SUM(_sample_interval) AS checks FROM usage GROUP BY day ORDER BY day").await?;
+```
+
+- **Columns.** The index is `index1`, blobs are `blob1`..`blob20` and doubles `double1`..`double20`, in the order they were added. A point carries one index of up to 96 bytes, which is also the sampling key: rows that share it are sampled together. `write` refuses a point over Analytics Engine's limits (20 blobs, 20 doubles, 16 KB of blobs) instead of letting it be dropped.
+- **Sampling.** Analytics Engine may sample busy datasets, so count with `SUM(_sample_interval)`, not `COUNT()`.
+- **Reading** goes through the SQL API, not the binding: it needs the account id and an API token with Account Analytics Read. The API has no parameters, so never put request input into the SQL. Integer columns arrive as JSON strings: read them as `String`, or cast in SQL (`toFloat64(..)`).
+- **Locally,** `doko dev` accepts writes and drops them, and `query` reads the real account.
+- `ctx.analytics(USAGE)?.raw()` gives the `worker` binding, for byte blobs.
 
 ## Integration tests
 

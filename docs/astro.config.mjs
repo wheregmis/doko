@@ -33,6 +33,7 @@ export default defineConfig({
 						'guides/email',
 						'guides/postgres',
 						'guides/workers-ai',
+						'guides/analytics-engine',
 						'guides/testing',
 					],
 				},

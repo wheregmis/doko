@@ -30,7 +30,7 @@ doko works the same way for Rust on Cloudflare Workers. Routing, config, storage
 		Write ordinary axum handlers that take a `Ctx`, return `doko::Result`, and get JSON errors, request logs and secure headers for free.
 	</Card>
 	<Card title="Batteries included" icon="puzzle">
-		KV, R2, D1, Postgres, caching, queues, cron, Durable Objects, auth, email and Workers AI, all behind typed APIs.
+		KV, R2, D1, Postgres, caching, queues, cron, Durable Objects, auth, email, Workers AI and Analytics Engine, all behind typed APIs.
 	</Card>
 	<Card title="A CLI that checks first" icon="seti:shell">
 		`doko dev`, `doko deploy`, generators, migrations, a SQL console, and a deploy that refuses to ship without its secrets.
@@ -59,6 +59,7 @@ doko new my-app && cd my-app && doko dev
 | [Email](/doko/guides/email/) | sending through a typed binding, receiving in `Hooks::on_email` |
 | [Postgres](/doko/guides/postgres/) | Hyperdrive-backed queries in D1's shape, with migrations (feature `pg`) |
 | [Workers AI](/doko/guides/workers-ai/) | `ctx.ai()` with serde types, and streamed answers |
+| [Analytics Engine](/doko/guides/analytics-engine/) | typed data points through `ctx.analytics()`, and SQL reads |
 | [The `doko` command](/doko/reference/cli/) | `routes`, `doctor`, `db seed` and `reset`, a SQL `console`, and a deploy that checks secrets and migrates first |
 | [Generators](/doko/guides/generators/) | `doko new`, `generate scaffold \| auth \| controller \| job \| mailer \| migration` |
 | [Integration tests](/doko/guides/testing/) | `doko::test` runs your worker under `wrangler dev` |

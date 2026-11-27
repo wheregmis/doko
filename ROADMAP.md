@@ -39,7 +39,7 @@ Phases 11 to 16 built the framework layer around the products: an escape hatch t
 ## Backlog
 
 More batteries, picked up after the phases above or when a user needs them:
-- Bindings `worker` 0.9 already has: service bindings, Analytics Engine, Secrets Store, the native rate-limit binding (a cheaper default than a Durable Object per client).
+- Bindings `worker` 0.9 already has: service bindings, Secrets Store, the native rate-limit binding (a cheaper default than a Durable Object per client).
 - A shipped `Channel` Durable Object with `ctx.channel(ROOMS, name).broadcast(&msg)`, next to `RateLimiter` and `SessionStore`.
 - Jobs: a dead-letter hook, a failed-jobs listing, idempotency keys.
 - Storage: presigned upload and download URLs; range requests in `serve`.
