@@ -323,16 +323,35 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     STANDARD.decode(body).ok()
 }
 
+/// What checks a token's signature.
+#[derive(Debug, PartialEq)]
+enum Key<'a> {
+    Hmac(String),
+    Jwks(&'a str),
+    Pem(String),
+    /// The app takes no tokens of this algorithm: a 401, not a missing-secret 500 anyone could cause.
+    None,
+}
+
+/// Each algorithm has its own key, so a token can't pick HS256 to be checked against the public key.
+fn key_for<'a>(alg: Option<&str>, jwks_url: Option<&'a str>, secret: impl Fn(&str) -> Option<String>) -> Key<'a> {
+    match (alg, jwks_url) {
+        (Some("HS256"), _) => secret(JWT_SECRET).map_or(Key::None, Key::Hmac),
+        (Some("RS256"), Some(url)) => Key::Jwks(url),
+        (Some("RS256"), None) => secret(JWT_PUBLIC_KEY).map_or(Key::None, Key::Pem),
+        _ => Key::None,
+    }
+}
+
 async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
     let (input, header, claims, signature) = parse_jwt(token).ok_or_else(Error::unauthorized)?;
     let config = Config::load(ctx);
-    // Each algorithm has its own key, so a token can't pick HS256 to be checked against the public key.
-    let valid = match (header["alg"].as_str(), &config.jwks_url) {
-        (Some("HS256"), _) => {
-            let secret = ctx.secret(JWT_SECRET)?;
+    let secret = |name: &str| ctx.env().secret(name).ok().map(|s| s.to_string());
+    let valid = match key_for(header["alg"].as_str(), config.jwks_url.as_deref(), secret) {
+        Key::Hmac(secret) => {
             SendFuture::new(hmac_verify(secret.as_bytes(), input.as_bytes(), &signature)).await.map_err(js_err)?
         }
-        (Some("RS256"), Some(url)) => match jwk(url, header["kid"].as_str()).await? {
+        Key::Jwks(url) => match jwk(url, header["kid"].as_str()).await? {
             Some(key) => {
                 SendFuture::new(async { rsa_verify("jwk", JSON::parse(&key)?, input.as_bytes(), &signature).await })
                     .await
@@ -340,14 +359,14 @@ async fn verify_jwt(ctx: &Ctx, token: &str) -> Result<Value> {
             }
             None => false,
         },
-        (Some("RS256"), None) => {
-            let der = pem_to_der(&ctx.secret(JWT_PUBLIC_KEY)?)
+        Key::Pem(pem) => {
+            let der = pem_to_der(&pem)
                 .ok_or_else(|| Error::internal(format!("`{JWT_PUBLIC_KEY}` is not a PEM public key")))?;
             SendFuture::new(async { rsa_verify("spki", bytes(&der), input.as_bytes(), &signature).await })
                 .await
                 .map_err(js_err)?
         }
-        _ => false,
+        Key::None => false,
     };
     let now = Date::now().as_millis() / 1000;
     if valid && in_validity_window(&claims, now) && issued_for(&claims, &config) {
@@ -677,6 +696,21 @@ impl DurableObject for SessionStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_token_for_a_key_the_app_lacks_is_refused_not_an_error() {
+        let none = |_: &str| None;
+        let both = |name: &str| Some(format!("{name}-value"));
+        // An RS256-only app (jwks_url, no JWT_SECRET) gets a self-made HS256 token: a 401, not a 500.
+        assert_eq!(key_for(Some("HS256"), Some("https://id.test/certs"), none), Key::None);
+        assert_eq!(key_for(Some("RS256"), None, none), Key::None);
+        assert_eq!(key_for(Some("HS256"), None, both), Key::Hmac("JWT_SECRET-value".into()));
+        assert_eq!(key_for(Some("RS256"), None, both), Key::Pem("JWT_PUBLIC_KEY-value".into()));
+        assert_eq!(key_for(Some("RS256"), Some("https://id.test/certs"), both), Key::Jwks("https://id.test/certs"));
+        for alg in [None, Some("none"), Some("ES256"), Some("hs256")] {
+            assert_eq!(key_for(alg, Some("https://id.test/certs"), both), Key::None, "{alg:?}");
+        }
+    }
 
     #[test]
     fn finds_the_session_cookie() {
