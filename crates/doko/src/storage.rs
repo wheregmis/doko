@@ -61,6 +61,10 @@ binding!(
     EmailBinding
 );
 binding!(
+    /// An `[analytics.NAME]` Analytics Engine dataset from doko.toml, for `Ctx::analytics`.
+    AnalyticsBinding
+);
+binding!(
     /// A `[hyperdrive.NAME]` Postgres binding from doko.toml, for `Ctx::pg` (feature `pg`).
     HyperdriveBinding
 );

@@ -32,6 +32,7 @@ Each binding is a table named after the binding: `[kv.CACHE]` becomes the consta
 | `[email.NAME]` | `destination_address`, `allowed_destination_addresses`, `allowed_sender_addresses`, `remote` | `ctx.mail(NAME)` |
 | `[hyperdrive.NAME]` | `id`, `local_connection_string` | `ctx.pg(NAME)` (feature `pg`) |
 | `[ai]` | no keys | `ctx.ai()` |
+| `[analytics.NAME]` | `dataset` | `ctx.analytics(NAME)` |
 
 ## Environments
 

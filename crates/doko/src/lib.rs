@@ -15,6 +15,7 @@
 //! The app crate must also depend on `worker` directly: worker's `#[event]` macro expands to `::worker::` paths.
 
 mod ai;
+pub mod analytics;
 pub mod auth;
 mod cache;
 mod durable;
@@ -30,6 +31,7 @@ mod storage;
 pub mod test;
 
 pub use ai::Ai;
+pub use analytics::{Analytics, DataPoint};
 pub use axum;
 pub use cache::{Cache, Policy, RouterExt};
 pub use durable::{Durable, DurableObject, RateLimit, RateLimiter, Stub, accept_websocket};
@@ -42,8 +44,8 @@ pub use mail::{Attachment, EmailBody, InboundEmail, Mailer, Message, escape_html
 pub use pg::{Pg, PgStatement};
 pub use request::{Errors, Page, Paged, Valid, Validate};
 pub use storage::{
-    Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding, R2Binding,
-    Statement, bool_from_sql,
+    AnalyticsBinding, Bucket, D1Binding, Db, DoBinding, EmailBinding, HyperdriveBinding, Kv, KvBinding, QueueBinding,
+    R2Binding, Statement, bool_from_sql,
 };
 pub use worker;
 

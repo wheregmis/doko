@@ -43,6 +43,7 @@ crate-type = ["cdylib"]
 | `durable(DO)` | `Durable`, whose `get(name)` gives a `Stub` | [Durable Objects](/doko/guides/durable-objects/) |
 | `mail(EMAIL)` | `Mailer` | [Email](/doko/guides/email/) |
 | `ai()` | `Ai`: `run`, `stream` | [Workers AI](/doko/guides/workers-ai/) |
+| `analytics(DATASET)` | `Analytics`: `write` | [Analytics Engine](/doko/guides/analytics-engine/) |
 | `wait_until(fut)` | runs work after the response is sent | [Handlers](/doko/guides/handlers/) |
 | `env()` | the raw `worker::Env` | |
 
@@ -52,12 +53,13 @@ crate-type = ["cdylib"]
 |---|---|
 | Requests | `Page`, `Paged<T>`, `Valid<T>`, `Validate`, `Errors` |
 | Routing | `RouterExt`: `.cache(Policy)`, `.rate_limit(RateLimit)`, `.require_auth()`; `Policy` |
-| Storage | `Kv`, `Bucket`, `Db`, `Statement`, `bool_from_sql`, and the binding types `KvBinding`, `R2Binding`, `D1Binding`, `QueueBinding`, `DoBinding`, `EmailBinding`, `HyperdriveBinding` |
+| Storage | `Kv`, `Bucket`, `Db`, `Statement`, `bool_from_sql`, and the binding types `KvBinding`, `R2Binding`, `D1Binding`, `QueueBinding`, `DoBinding`, `EmailBinding`, `HyperdriveBinding`, `AnalyticsBinding` |
 | Jobs | `Job`, `Jobs`, `Tasks` |
 | Durable Objects | `DurableObject`, `Durable`, `Stub`, `accept_websocket`, `RateLimiter`, `RateLimit` |
 | Auth (`doko::auth`) | `Session`, `SetCookie`, `Claims<T>`, `SessionStore`, `sign`, `hash_password`, `verify_password`, `token`, `read_token` |
 | Email | `Message`, `Attachment`, `Mailer`, `InboundEmail`, `EmailBody`, `render_html`, `render_text`, `escape_html` |
 | Workers AI | `Ai` |
+| Analytics Engine | `Analytics`, `DataPoint`, `analytics::query` |
 | Postgres (feature `pg`) | `Pg`, `PgStatement` |
 | Tests (feature `test`) | `doko::test::App` |
 

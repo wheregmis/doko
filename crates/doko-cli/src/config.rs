@@ -145,7 +145,7 @@ fn check_auth(auth: &Table) -> Result<(), String> {
 }
 
 /// Wrangler keys doko writes itself; `[wrangler]` may not set them.
-const OWNED: [&str; 15] = [
+const OWNED: [&str; 16] = [
     "name",
     "main",
     "compatibility_date",
@@ -161,6 +161,7 @@ const OWNED: [&str; 15] = [
     "send_email",
     "hyperdrive",
     "ai",
+    "analytics_engine_datasets",
 ];
 
 // shortcut: the keys wrangler rejects inside `[env.*]`, listed by hand; add to it when wrangler adds one.
@@ -252,6 +253,8 @@ struct Bindings {
     email: BTreeMap<String, Email>,
     #[serde(default)]
     hyperdrive: BTreeMap<String, Hyperdrive>,
+    #[serde(default)]
+    analytics: BTreeMap<String, Analytics>,
     /// `[ai]`: Workers AI, bound as `AI` for `ctx.ai()`.
     ai: Option<Ai>,
 }
@@ -266,6 +269,13 @@ struct Hyperdrive {
     /// The database `doko dev` and `doko migrate --pg` use. Local credentials only: this file is committed.
     #[serde(rename(serialize = "localConnectionString"), skip_serializing_if = "Option::is_none")]
     local_connection_string: Option<String>,
+}
+
+/// An Analytics Engine dataset, for `ctx.analytics(NAME)`. Wrangler creates it on the first write.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Analytics {
+    dataset: String,
 }
 
 /// `[ai]` has no settings yet.
@@ -435,6 +445,8 @@ struct Resources {
     send_email: Vec<Named<Email>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hyperdrive: Vec<Bound<Hyperdrive>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    analytics_engine_datasets: Vec<Bound<Analytics>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ai: Option<AiBinding>,
     /// The `[wrangler]` table, minus `vars`.
@@ -543,6 +555,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
             b.durable.extend(e.bindings.durable.clone());
             b.email.extend(e.bindings.email.clone());
             b.hyperdrive.extend(e.bindings.hyperdrive.clone());
+            b.analytics.extend(e.bindings.analytics.clone());
             b.ai = e.bindings.ai.clone().or(b.ai);
         }
         let at = if env == DEFAULT_ENV { String::new() } else { format!(" [env.{env}]") };
@@ -590,6 +603,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
                     h
                 })
                 .collect(),
+            analytics_engine_datasets: bound(&b.analytics),
             ai: b.ai.as_ref().map(|_| AiBinding { binding: AI_BINDING }),
             extra,
         };
@@ -626,6 +640,7 @@ pub fn render_over(doko_toml: &str, previous_wrangler_toml: &str) -> Result<Outp
         all.durable.extend(b.durable.clone());
         all.email.extend(b.email);
         all.hyperdrive.extend(b.hyperdrive);
+        all.analytics.extend(b.analytics);
         all.ai = all.ai.or(b.ai);
         all.queues.extend(b.queues);
         classes.extend(b.durable.into_values().map(|d| d.class_name));
@@ -773,6 +788,16 @@ fn check_and_normalize_tasks(tasks: &mut BTreeMap<String, String>) -> Result<(),
 }
 
 fn check_resources(b: &Bindings) -> Result<(), String> {
+    for (binding, a) in &b.analytics {
+        // Datasets are named in SQL (`FROM name`), so keep them to what needs no quoting.
+        let d = &a.dataset;
+        if d.is_empty()
+            || !d.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !d.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(format!("analytics `{binding}`: `dataset` must be letters, digits and _ (got `{d}`)"));
+        }
+    }
     for (binding, r2) in &b.r2 {
         if r2.bucket_name.trim().is_empty() {
             return Err(format!("r2 `{binding}`: `bucket_name` must not be empty"));
@@ -813,7 +838,7 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
             .chain(b.queues.keys())
             .chain(b.durable.keys())
             .chain(b.email.keys());
-    let names = names.chain(b.hyperdrive.keys());
+    let names = names.chain(b.hyperdrive.keys()).chain(b.analytics.keys());
     let mut seen = BTreeSet::new();
     // `[ai]` takes this name in every env that declares it.
     let ai = AI_BINDING.to_owned();
@@ -838,11 +863,11 @@ fn check_binding_names(b: &Bindings) -> Result<(), String> {
 
 fn bindings_rs(b: &Bindings) -> Option<String> {
     let none = b.kv.is_empty() && b.r2.is_empty() && b.d1.is_empty() && b.queues.is_empty() && b.durable.is_empty();
-    if none && b.email.is_empty() && b.hyperdrive.is_empty() {
+    if none && b.email.is_empty() && b.hyperdrive.is_empty() && b.analytics.is_empty() {
         return None;
     }
     let mut s = format!("{BINDINGS_HEADER}\n");
-    let kinds: [(&str, Vec<&String>); 7] = [
+    let kinds: [(&str, Vec<&String>); 8] = [
         ("Kv", b.kv.keys().collect()),
         ("R2", b.r2.keys().collect()),
         ("D1", b.d1.keys().collect()),
@@ -850,6 +875,7 @@ fn bindings_rs(b: &Bindings) -> Option<String> {
         ("Do", b.durable.keys().collect()),
         ("Email", b.email.keys().collect()),
         ("Hyperdrive", b.hyperdrive.keys().collect()),
+        ("Analytics", b.analytics.keys().collect()),
     ];
     for (kind, names) in kinds {
         for name in names {
@@ -1107,6 +1133,19 @@ mod tests {
         assert!(
             render("[app]\nname = \"a\"\ncompatibility_date = \"2026-11-01\"\nrequest_timeout_secs = 0\n").is_err()
         );
+    }
+
+    #[test]
+    fn renders_analytics_bindings() {
+        let o = out("[analytics.USAGE]\ndataset = \"usage\"\n[env.prod.analytics.USAGE]\ndataset = \"usage_prod\"\n");
+        let v: Table = toml::from_str(&o.wrangler_toml).unwrap();
+        assert_eq!(v["analytics_engine_datasets"][0]["binding"].as_str(), Some("USAGE"));
+        assert_eq!(v["analytics_engine_datasets"][0]["dataset"].as_str(), Some("usage"));
+        assert_eq!(v["env"]["prod"]["analytics_engine_datasets"][0]["dataset"].as_str(), Some("usage_prod"));
+        assert!(o.bindings_rs.unwrap().contains("pub const USAGE: doko::AnalyticsBinding"));
+        assert!(err("[analytics.USAGE]\ndataset = \"my usage\"\n").contains("dataset"));
+        assert!(err("[analytics.USAGE]\n").contains("dataset"));
+        assert!(err("[wrangler]\nanalytics_engine_datasets = []\n").contains("analytics_engine_datasets"));
     }
 
     #[test]
